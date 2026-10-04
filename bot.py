@@ -13,6 +13,7 @@ import feedparser
 import httpx
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.exceptions import TelegramConflictError
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, ErrorEvent, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -893,6 +894,24 @@ async def main():
     except Exception as exc:
         logger.error("Не удалось настроить планировщик: %s", exc)
 
+    # --- Сброс webhook перед polling ---
+    # Если для токена установлен webhook, getUpdates НЕ получает апдейты —
+    # Telegram шлёт их на webhook-URL, а бот «молчит» без ошибок. Бот работает
+    # строго в polling-режиме, поэтому webhook принудительно удаляем на старте.
+    try:
+        wh = await bot.get_webhook_info()
+        logger.info(
+            "Webhook info: url=%r pending_updates=%s last_error=%r",
+            wh.url or "-",
+            wh.pending_update_count,
+            wh.last_error_message or "-",
+        )
+        if wh.url:
+            await bot.delete_webhook(drop_pending_updates=True)
+            logger.warning("Webhook %r удалён — апдейты пойдут через polling.", wh.url)
+    except Exception as exc:
+        logger.warning("Не удалось проверить/сбросить webhook: %s", exc)
+
     # --- Проверка связи с Telegram до старта polling ---
     online = await _ensure_bot_online(bot)
     if not online and PROXY_URL:
@@ -914,6 +933,15 @@ async def main():
     logger.info("🚀 Бот запущен. Стартую polling...")
     try:
         await dp.start_polling(bot)
+    except TelegramConflictError as exc:
+        logger.critical(
+            "CONFLICT 409: для этого токена уже работает другой экземпляр бота "
+            "(старый контейнер/процесс) либо установлен webhook — апдейты уходят "
+            "не нам. Останови все остальные экземпляры и перезапусти контейнер "
+            "(docker compose up -d --build --force-recreate). Причина: %s",
+            exc,
+        )
+        raise
     except Exception as exc:
         logger.exception("Polling завершился с ошибкой: %s", exc)
         raise  # docker restart: unless-stopped перезапустит контейнер
