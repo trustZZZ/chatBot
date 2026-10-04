@@ -1,0 +1,972 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Trend Scanner — Веб-панель</title>
+    <style>
+      :root {
+        --bg: #0d1117;
+        --panel: #161b22;
+        --panel2: #1c2128;
+        --border: #30363d;
+        --text: #e6edf3;
+        --muted: #8b949e;
+        --accent: #58a6ff;
+        --green: #3fb950;
+        --yellow: #d29922;
+        --red: #f85149;
+        --purple: #bc8cff;
+        --radius: 10px;
+      }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        line-height: 1.55;
+        min-height: 100vh;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+        padding: 18px 24px;
+        border-bottom: 1px solid var(--border);
+        background: var(--panel);
+        position: sticky;
+        top: 0;
+        z-index: 20;
+      }
+      header h1 {
+        font-size: 20px;
+        letter-spacing: 0.3px;
+      }
+      header .sub {
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 2px;
+      }
+      .chips {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .chip {
+        font-size: 12px;
+        padding: 4px 10px;
+        border-radius: 20px;
+        border: 1px solid var(--border);
+        background: var(--panel2);
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .chip.ok {
+        color: var(--green);
+        border-color: rgba(63, 185, 80, 0.4);
+      }
+      .chip.warn {
+        color: var(--yellow);
+        border-color: rgba(210, 153, 34, 0.4);
+      }
+      .chip.err {
+        color: var(--red);
+        border-color: rgba(248, 81, 73, 0.4);
+      }
+      main {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+      section {
+        margin-bottom: 32px;
+      }
+      h2 {
+        font-size: 16px;
+        margin-bottom: 12px;
+        color: var(--text);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      h2 .count {
+        color: var(--muted);
+        font-weight: 400;
+        font-size: 13px;
+      }
+      .toolbar {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+      }
+      .btn {
+        background: var(--panel2);
+        color: var(--text);
+        border: 1px solid var(--border);
+        padding: 9px 16px;
+        border-radius: var(--radius);
+        font-size: 14px;
+        cursor: pointer;
+        transition:
+          background 0.15s,
+          border-color 0.15s,
+          opacity 0.15s;
+      }
+      .btn:hover:not(:disabled) {
+        background: #21262d;
+        border-color: var(--accent);
+      }
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .btn.primary {
+        background: linear-gradient(135deg, #1f6feb, #388bfd);
+        border-color: #1f6feb;
+        color: #fff;
+      }
+      .btn.primary:hover:not(:disabled) {
+        filter: brightness(1.1);
+      }
+      .btn.green {
+        background: linear-gradient(135deg, #238636, #2ea043);
+        border-color: #238636;
+        color: #fff;
+      }
+      .btn.small {
+        padding: 5px 10px;
+        font-size: 12px;
+      }
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 10px;
+        margin-bottom: 24px;
+      }
+      .stat {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 14px 16px;
+      }
+      .stat .num {
+        font-size: 26px;
+        font-weight: 700;
+        color: var(--accent);
+      }
+      .stat .lbl {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 2px;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 16px;
+        margin-bottom: 12px;
+      }
+      .empty {
+        color: var(--muted);
+        font-size: 14px;
+        padding: 12px 0;
+      }
+      .badge {
+        display: inline-block;
+        font-size: 11px;
+        padding: 2px 8px;
+        border-radius: 12px;
+        background: var(--panel2);
+        border: 1px solid var(--border);
+        color: var(--muted);
+        margin-right: 6px;
+      }
+      .badge.score {
+        color: var(--yellow);
+      }
+      .t-title {
+        font-size: 15px;
+        font-weight: 600;
+        margin: 8px 0;
+      }
+      .t-reason {
+        font-size: 13px;
+        color: var(--muted);
+        background: var(--panel2);
+        border-left: 3px solid var(--accent);
+        padding: 8px 10px;
+        border-radius: 4px;
+        margin: 8px 0;
+      }
+      .t-actions {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      select,
+      input,
+      textarea {
+        background: var(--panel2);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 14px;
+        font-family: inherit;
+        outline: none;
+      }
+      select:focus,
+      input:focus,
+      textarea:focus {
+        border-color: var(--accent);
+      }
+      .plans {
+        margin-top: 12px;
+        display: grid;
+        gap: 10px;
+      }
+      .plan {
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 12px 14px;
+        background: var(--panel2);
+      }
+      .plan h4 {
+        font-size: 14px;
+        margin-bottom: 6px;
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        align-items: center;
+      }
+      .plan ul {
+        margin: 6px 0 10px 20px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .plan li {
+        margin-bottom: 2px;
+      }
+      .hint {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 8px;
+      }
+      .error {
+        color: var(--red);
+        font-size: 13px;
+        margin-top: 8px;
+      }
+      .loader {
+        display: inline-block;
+        width: 16px;
+        height: 16px;
+        border: 2px solid var(--border);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+        vertical-align: middle;
+        margin-right: 8px;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      details {
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        margin-bottom: 8px;
+        background: var(--panel2);
+      }
+      summary {
+        cursor: pointer;
+        padding: 10px 14px;
+        font-size: 13px;
+        color: var(--muted);
+        user-select: none;
+      }
+      .article-body {
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 16px 18px;
+        margin: 10px 0;
+        background: #fff;
+        color: #1f2328;
+        font-size: 15px;
+      }
+      .article-body h2 {
+        color: #1f2328;
+        font-size: 20px;
+        margin: 16px 0 8px;
+        display: block;
+      }
+      .article-body h3 {
+        color: #1f2328;
+        font-size: 17px;
+        margin: 12px 0 6px;
+      }
+      .article-body p {
+        margin: 8px 0;
+      }
+      .article-body a {
+        color: #0969da;
+        text-decoration: none;
+      }
+      .article-body a:hover {
+        text-decoration: underline;
+      }
+      .article-body ul,
+      .article-body ol {
+        margin: 8px 0 8px 22px;
+      }
+      .article-body li {
+        margin: 4px 0;
+      }
+      .article-body strong {
+        font-weight: 700;
+      }
+      .factcheck {
+        white-space: pre-wrap;
+        font-size: 13px;
+        color: var(--text);
+        padding: 12px 14px;
+        line-height: 1.6;
+      }
+      .art-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .app-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 12px;
+      }
+      .app-card {
+        background: var(--panel2);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 12px 14px;
+        font-size: 13px;
+      }
+      .app-card .nm {
+        font-weight: 600;
+        font-size: 14px;
+        margin-bottom: 4px;
+      }
+      .app-card .meta {
+        color: var(--muted);
+        margin-top: 4px;
+        font-size: 12px;
+      }
+      form.app-form {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-bottom: 16px;
+      }
+      form.app-form .full {
+        grid-column: 1/-1;
+      }
+      .url-link {
+        color: var(--green);
+        word-break: break-all;
+      }
+      footer {
+        padding: 20px 24px;
+        border-top: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 12px;
+        text-align: center;
+      }
+      #toast {
+        position: fixed;
+        right: 20px;
+        bottom: 20px;
+        z-index: 100;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .toast-item {
+        background: var(--panel2);
+        border: 1px solid var(--border);
+        border-left: 4px solid var(--accent);
+        padding: 10px 14px;
+        border-radius: 8px;
+        font-size: 13px;
+        max-width: 380px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+        animation: fadein 0.2s ease;
+      }
+      .toast-item.ok {
+        border-left-color: var(--green);
+      }
+      .toast-item.err {
+        border-left-color: var(--red);
+      }
+      @keyframes fadein {
+        from {
+          opacity: 0;
+          transform: translateY(8px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      @media (max-width: 640px) {
+        form.app-form {
+          grid-template-columns: 1fr;
+        }
+        main {
+          padding: 16px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>📡 Trend Scanner</h1>
+        <div class="sub">Сбор трендов · генерация статей · публикация</div>
+      </div>
+      <div class="chips" id="status-chips">
+        <span class="chip">загрузка…</span>
+      </div>
+    </header>
+
+    <main>
+      <section>
+        <div class="toolbar">
+          <button class="btn primary" id="btn-collect">
+            🔄 Собрать тренды
+          </button>
+          <button class="btn green" id="btn-rank" disabled>
+            🧠 Отранжировать (LLM)
+          </button>
+          <button class="btn" id="btn-refresh">🗂 Обновить списки</button>
+        </div>
+        <div class="stats" id="stats"></div>
+      </section>
+
+      <section id="raw-section" hidden>
+        <h2>🌐 Последний сбор <span class="count" id="raw-count"></span></h2>
+        <ol id="raw-list"></ol>
+      </section>
+
+      <section>
+        <h2>📰 Темы дня <span class="count" id="topics-count"></span></h2>
+        <div id="topics"></div>
+      </section>
+
+      <section>
+        <h2>📄 Статьи <span class="count" id="articles-count"></span></h2>
+        <div id="articles"></div>
+      </section>
+
+      <section>
+        <h2>
+          🤝 Заявки на коллаборацию <span class="count" id="apps-count"></span>
+        </h2>
+        <form class="app-form" id="app-form">
+          <input
+            type="text"
+            id="app-name"
+            placeholder="Как вас зовут?"
+            required
+          />
+          <select id="app-role" required>
+            <option value="Разработка">💻 Разработка</option>
+            <option value="Дизайн">🎨 Дизайн</option>
+            <option value="Продакт">📊 Продакт</option>
+            <option value="Партнёрство">🤝 Партнёрство</option>
+          </select>
+          <input
+            type="text"
+            id="app-skills"
+            class="full"
+            placeholder="Навыки / стек (через запятую)"
+            required
+          />
+          <input
+            type="text"
+            id="app-contact"
+            class="full"
+            placeholder="Контакт (Telegram или почта)"
+            required
+          />
+          <button type="submit" class="btn primary full">
+            📨 Отправить заявку
+          </button>
+        </form>
+        <div id="applications"></div>
+      </section>
+    </main>
+
+    <footer>
+      Trend Scanner · веб-панель без Telegram-бота · LLM:
+      <span id="llm-model">—</span>
+    </footer>
+    <div id="toast"></div>
+
+    <script>
+      "use strict";
+
+      const $ = (id) => document.getElementById(id);
+      const S = {
+        raw: [],
+        topics: [],
+        reasons: {}, // id -> reason (приходит из ранжирования)
+        platform: {}, // topic_id -> выбранная платформа
+        plansByTopic: {}, // topic_id -> {plans, platform_name, style}
+        articles: [],
+        apps: [],
+        platforms: [],
+      };
+
+      // ---------- Утилиты ----------
+      function esc(s) {
+        const AMP = String.fromCharCode(38);
+        const ent = (c) => AMP + "#" + c.charCodeAt(0) + ";";
+        return String(s ?? "").replace(/[&<>"']/g, ent);
+      }
+      function stripHtml(h) {
+        const d = document.createElement("div");
+        d.innerHTML = h || "";
+        return d.textContent || "";
+      }
+      function fmtDt(iso) {
+        if (!iso) return "—";
+        const d = new Date(iso);
+        return d.toLocaleString("ru-RU", {
+          day: "2-digit",
+          month: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+      }
+      function toast(msg, type) {
+        const el = document.createElement("div");
+        el.className = "toast-item " + (type || "");
+        el.textContent = msg;
+        $("toast").appendChild(el);
+        setTimeout(() => el.remove(), 5000);
+      }
+      async function api(path, opts) {
+        const init = { headers: { "Content-Type": "application/json" } };
+        if (opts?.method) init.method = opts.method;
+        if (opts?.body) init.body = JSON.stringify(opts.body);
+        const r = await fetch(path, init);
+        let data = null;
+        try {
+          data = await r.json();
+        } catch (_) {}
+        if (!r.ok) {
+          const msg =
+            data && data.detail
+              ? typeof data.detail === "string"
+                ? data.detail
+                : JSON.stringify(data.detail)
+              : "HTTP " + r.status;
+          throw new Error(msg);
+        }
+        return data;
+      }
+      async function busy(btn, fn) {
+        const old = btn.innerHTML,
+          was = btn.disabled;
+        btn.disabled = true;
+        btn.innerHTML = '<span class="loader"></span>…';
+        try {
+          await fn();
+        } catch (e) {
+          console.error(e);
+          toast(e.message, "err");
+        } finally {
+          btn.disabled = was;
+          btn.innerHTML = old;
+        }
+      }
+
+      // ---------- Статус и статистика ----------
+      let STATUS = null;
+      async function loadStatus() {
+        try {
+          STATUS = await api("/api/status");
+          const chips = $("status-chips");
+          chips.innerHTML = "";
+          const st = STATUS.state || {};
+          const sched = STATUS.scheduler_running
+            ? `<span class="chip ok">⏰ Автосбор ${esc(STATUS.trends_time)} МСК · след. ${fmtDt(STATUS.next_daily_run)}</span>`
+            : `<span class="chip warn">⏰ Планировщик выключен</span>`;
+          const llm = STATUS.llm_configured
+            ? `<span class="chip ok">🧠 LLM: ${esc(STATUS.llm_model)}</span>`
+            : `<span class="chip err">🧠 LLM не настроен</span>`;
+          const prx = STATUS.proxy
+            ? `<span class="chip">🛰 Прокси: ${esc(STATUS.proxy)}</span>`
+            : `<span class="chip">🛰 Прямое подключение</span>`;
+          chips.innerHTML = sched + llm + prx;
+          $("llm-model").textContent = STATUS.llm_model || "—";
+          renderStats();
+        } catch (e) {
+          toast("Не удалось получить статус: " + e.message, "err");
+        }
+      }
+      function renderStats() {
+        const st = STATUS?.state || {};
+        const nums = [
+          {
+            n: st.last_collect_count || 0,
+            l: "Собрано трендов",
+            t: st.last_collect ? fmtDt(st.last_collect) : "",
+          },
+          { n: S.topics.length, l: "Тем в БД" },
+          { n: S.articles.length, l: "Статей" },
+          { n: S.apps.length, l: "Заявок" },
+          {
+            n: st.last_daily ? "✓" : "—",
+            l: "Последний автосбор",
+            t: st.last_daily ? fmtDt(st.last_daily) : "",
+          },
+        ];
+        $("stats").innerHTML = nums
+          .map(
+            (x) =>
+              `<div class="stat"><div class="num">${esc(x.n)}</div><div class="lbl">${esc(x.l)}</div>` +
+              (x.t ? `<div class="lbl">${esc(x.t)}</div>` : "") +
+              `</div>`,
+          )
+          .join("");
+      }
+
+      // ---------- Сбор и ранжирование ----------
+      async function onCollect() {
+        await busy($("btn-collect"), async () => {
+          const data = await api("/api/trends/collect", { method: "POST" });
+          S.raw = data.items;
+          $("btn-rank").disabled = false;
+          renderRaw();
+          await loadStatus();
+          toast(`Собрано трендов: ${data.count}`, "ok");
+        });
+      }
+      function renderRaw() {
+        const sec = $("raw-section");
+        sec.hidden = !S.raw.length;
+        $("raw-count").textContent = "(" + S.raw.length + ")";
+        $("raw-list").innerHTML = "";
+        S.raw.slice(0, 50).forEach((it) => {
+          const li = document.createElement("li");
+          li.style.cssText = "margin-bottom:6px; font-size:14px";
+          const badge =
+            `<span class="badge">${esc(it.source)}</span>` +
+            (it.score ? `<span class="badge score">★ ${it.score}</span>` : "");
+          const link = it.url
+            ? `<a href="${esc(it.url)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(it.title)}</a>`
+            : esc(it.title);
+          li.innerHTML = badge + " " + link;
+          $("raw-list").appendChild(li);
+        });
+        if (S.raw.length > 50)
+          $("raw-list").insertAdjacentHTML(
+            "beforeend",
+            `<li class="hint">… ещё ${S.raw.length - 50} шт.</li>`,
+          );
+      }
+      async function onRank() {
+        await busy($("btn-rank"), async () => {
+          const data = await api("/api/topics/rank", {
+            method: "POST",
+            body: {},
+          });
+          data.topics.forEach((t) => {
+            S.reasons[t.id] = t.reason;
+          });
+          await loadTopics();
+          toast(`Отобрано тем: ${data.topics.length}`, "ok");
+        });
+      }
+
+      // ---------- Темы ----------
+      async function loadTopics() {
+        const data = await api("/api/topics");
+        S.topics = data.topics;
+        Object.keys(S.reasons).forEach((id) => {
+          if (!S.topics.some((t) => t.id === Number(id))) delete S.reasons[id];
+        });
+        renderTopics();
+        renderStats();
+      }
+      function renderTopics() {
+        $("topics-count").textContent = "(" + S.topics.length + ")";
+        const wrap = $("topics");
+        wrap.innerHTML = "";
+        if (!S.topics.length) {
+          wrap.innerHTML = `<p class="empty">Пока нет тем. Нажми «🔄 Собрать тренды», затем «🧠 Отранжировать (LLM)».</p>`;
+          return;
+        }
+        S.topics.slice(0, 20).forEach((t) => wrap.appendChild(topicCard(t)));
+      }
+      function topicCard(t) {
+        const card = document.createElement("div");
+        card.className = "card";
+        const reason = S.reasons[t.id] || "";
+        const plat = S.platform[t.id] || "habr";
+        const hasPlans = S.plansByTopic[t.id];
+        card.innerHTML = `
+          <div class="badge">${esc(t.source || "—")}</div>
+          <div class="badge">📅 ${fmtDt(t.date)}</div>
+          <div class="t-title">${esc(t.title)}</div>
+          ${reason ? `<div class="t-reason">💡 ${esc(reason)}</div>` : ""}
+          <div class="t-actions">
+            <select class="plat-select" data-topic="${t.id}" title="Платформа для стиля статьи">
+              ${S.platforms.map((p) => `<option value="${esc(p.key)}" ${p.key === plat ? "selected" : ""}>${esc(p.name)}</option>`).join("")}
+            </select>
+            <button class="btn small" data-act="plans" data-id="${t.id}">🎯 Сгенерировать планы</button>
+          </div>
+          <div class="plans" id="plans-${t.id}"></div>
+        `;
+        card
+          .querySelector('[data-act="plans"]')
+          .addEventListener("click", () => onPlans(t.id));
+        if (hasPlans) renderPlans(t.id, hasPlans);
+        return card;
+      }
+      async function onPlans(topicId) {
+        const plat = document.querySelector(
+          `.plat-select[data-topic="${topicId}"]`,
+        ).value;
+        S.platform[topicId] = plat;
+        const box = $("plans-" + topicId);
+        box.innerHTML = `<p class="hint"><span class="loader"></span>Генерация планов… (30–90 сек)</p>`;
+        try {
+          const data = await api(`/api/topics/${topicId}/plans`, {
+            method: "POST",
+            body: { platform: plat },
+          });
+          S.plansByTopic[topicId] = {
+            plans: data.plans,
+            platform_name: data.platform_name,
+            style: data.style,
+          };
+          renderPlans(topicId, S.plansByTopic[topicId]);
+        } catch (e) {
+          box.innerHTML = `<p class="error">${esc(e.message)}</p>`;
+        }
+      }
+      function renderPlans(topicId, store) {
+        const box = $("plans-" + topicId);
+        box.innerHTML = `<div class="hint" style="margin-bottom:6px">Платформа: <b>${esc(store.platform_name)}</b> · ${esc(store.style)}</div>`;
+        store.plans.forEach((p, i) => {
+          const div = document.createElement("div");
+          div.className = "plan";
+          div.innerHTML = `
+            <h4><span>📌 План ${esc(p.variant)}: ${esc(p.title)}</span></h4>
+            <ul>${(p.points || []).map((pt) => `<li>${esc(pt)}</li>`).join("")}</ul>
+            <button class="btn small primary" data-act="art" data-topic="${topicId}" data-idx="${i}">✍️ Сгенерировать статью</button>
+            <div class="art-box" id="art-${topicId}-${i}"></div>
+          `;
+          div
+            .querySelector('[data-act="art"]')
+            .addEventListener("click", () => onArticle(topicId, i));
+          box.appendChild(div);
+        });
+      }
+
+      // ---------- Статьи ----------
+      async function onArticle(topicId, planIdx) {
+        const plat = S.platform[topicId] || "habr";
+        const box = $("art-" + topicId + "-" + planIdx);
+        box.innerHTML = `<p class="hint"><span class="loader"></span>Генерация статьи + фактчекинг… (1–3 мин)</p>`;
+        try {
+          const data = await api("/api/articles/generate", {
+            method: "POST",
+            body: { topic_id: topicId, plan_index: planIdx, platform: plat },
+          });
+          box.innerHTML = "";
+          prependArticle(data);
+          await loadArticles();
+        } catch (e) {
+          box.innerHTML = `<p class="error">${esc(e.message)}</p>`;
+        }
+      }
+      function prependArticle(a) {
+        const wrap = $("articles");
+        if (!wrap.querySelector(`[data-art-id="${a.id}"]`)) {
+          wrap.prepend(articleCard(a));
+        }
+        $("articles-count").textContent = "(" + wrap.children.length + ")";
+      }
+      function articleCard(a) {
+        const div = document.createElement("div");
+        div.className = "card";
+        div.dataset.artId = a.id;
+        const url = a.published_url || "";
+        div.innerHTML = `
+          <div class="badge">${esc(a.platform_name || a.platform || "")}</div>
+          <div class="badge">${a.status === "published" ? "✅ опубликована" : "📝 черновик"}</div>
+          <div class="t-title">${esc(a.plan_title || a.topic_title || "Статья")}</div>
+          ${url ? `<div class="hint">🔗 <a class="url-link" href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a></div>` : ""}
+          <details>
+            <summary>🔍 Фактчекинг</summary>
+            <div class="factcheck">${esc(a.factcheck || "отчёт недоступен")}</div>
+          </details>
+          <div class="article-body">${a.article || ""}</div>
+          <div class="art-actions">
+            <button class="btn small green" data-act="pub" data-id="${a.id}">📤 Опубликовать на Telegraph</button>
+            <button class="btn small" data-act="copy-h">📋 Копировать HTML</button>
+            <button class="btn small" data-act="copy-t">📋 Копировать текст</button>
+          </div>
+        `;
+        div
+          .querySelector('[data-act="pub"]')
+          .addEventListener("click", () => onPublish(a.id));
+        div
+          .querySelector('[data-act="copy-h"]')
+          .addEventListener("click", async () => {
+            try {
+              await navigator.clipboard.writeText(a.article || "");
+              toast("HTML скопирован", "ok");
+            } catch (e) {
+              toast("Не удалось скопировать: " + e.message, "err");
+            }
+          });
+        div
+          .querySelector('[data-act="copy-t"]')
+          .addEventListener("click", async () => {
+            try {
+              await navigator.clipboard.writeText(stripHtml(a.article));
+              toast("Текст скопирован", "ok");
+            } catch (e) {
+              toast("Не удалось скопировать: " + e.message, "err");
+            }
+          });
+        return div;
+      }
+      async function onPublish(articleId) {
+        const btn = document.querySelector(
+          `[data-act="pub"][data-id="${articleId}"]`,
+        );
+        if (btn) btn.disabled = true;
+        try {
+          const data = await api(`/api/articles/${articleId}/publish`, {
+            method: "POST",
+          });
+          const card = document.querySelector(`[data-art-id="${articleId}"]`);
+          if (card) {
+            card.insertAdjacentHTML(
+              "afterbegin",
+              `<div class="hint">🔗 Опубликовано: <a class="url-link" href="${esc(data.url)}" target="_blank" rel="noopener">${esc(data.url)}</a></div>`,
+            );
+          }
+          toast("Опубликовано на Telegraph", "ok");
+        } catch (e) {
+          toast(e.message, "err");
+        } finally {
+          if (btn) btn.disabled = false;
+        }
+      }
+      async function loadArticles() {
+        const data = await api("/api/articles");
+        S.articles = data.articles;
+        $("articles-count").textContent = "(" + S.articles.length + ")";
+        const wrap = $("articles");
+        wrap.innerHTML = "";
+        if (!S.articles.length) {
+          wrap.innerHTML = `<p class="empty">Статей пока нет. Выбери тему → «Сгенерировать планы» → план → «Сгенерировать статью».</p>`;
+          return;
+        }
+        S.articles.forEach((a) => wrap.appendChild(articleCard(a)));
+        renderStats();
+      }
+
+      // ---------- Заявки ----------
+      async function loadApps() {
+        const data = await api("/api/applications");
+        S.apps = data.applications;
+        $("apps-count").textContent = "(" + S.apps.length + ")";
+        const wrap = $("applications");
+        wrap.innerHTML = "";
+        if (!S.apps.length) {
+          wrap.innerHTML = `<p class="empty">Заявок нет.</p>`;
+          return;
+        }
+        S.apps.forEach((a) => {
+          const card = document.createElement("div");
+          card.className = "app-card";
+          card.innerHTML = `
+            <div class="nm">${esc(a.name)}</div>
+            <div>💼 ${esc(a.role)}</div>
+            <div>🛠 ${esc(a.skills)}</div>
+            <div>📫 ${esc(a.contact)}</div>
+            <div class="meta">📅 ${fmtDt(a.created_at)} · <a href="#" class="del" data-id="${a.id}" style="color:var(--red)">удалить</a></div>
+          `;
+          card.querySelector(".del").addEventListener("click", async (ev) => {
+            ev.preventDefault();
+            await api(`/api/applications/${a.id}`, { method: "DELETE" });
+            await loadApps();
+            toast("Заявка удалена", "ok");
+          });
+          wrap.appendChild(card);
+        });
+        renderStats();
+      }
+      async function onAppSubmit(ev) {
+        ev.preventDefault();
+        const payload = {
+          name: $("app-name").value.trim(),
+          role: $("app-role").value,
+          skills: $("app-skills").value.trim(),
+          contact: $("app-contact").value.trim(),
+        };
+        if (!payload.name || !payload.skills || !payload.contact) return;
+        const btn = ev.target.querySelector("button[type=submit]");
+        await busy(btn, async () => {
+          await api("/api/applications", { method: "POST", body: payload });
+          ev.target.reset();
+          await loadApps();
+          toast("Заявка отправлена!", "ok");
+        });
+      }
+
+      // ---------- Инициализация ----------
+      async function init() {
+        $("btn-collect").addEventListener("click", onCollect);
+        $("btn-rank").addEventListener("click", onRank);
+        $("btn-refresh").addEventListener("click", refreshAll);
+        $("app-form").addEventListener("submit", onAppSubmit);
+        await refreshAll();
+      }
+      async function refreshAll() {
+        $("btn-refresh").disabled = true;
+        try {
+          await Promise.allSettled([
+            loadStatus(),
+            loadPlatforms(),
+            loadTopics(),
+            loadArticles(),
+            loadApps(),
+          ]);
+        } finally {
+          $("btn-refresh").disabled = false;
+        }
+      }
+      async function loadPlatforms() {
+        const data = await api("/api/platforms");
+        S.platforms = data.platforms;
+      }
+      init();
+    </script>
+  </body>
+</html>

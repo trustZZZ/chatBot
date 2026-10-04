@@ -1,24 +1,33 @@
+"""
+Trend Scanner — веб-панель сбора и генерации контента (без Telegram-бота).
+
+Собирает IT-тренды (HackerNews, GitHub Trending, Google News RSS),
+ранжирует темы через LLM (DeepSeek), генерирует планы статей и сами статьи,
+проводит фактчекинг и публикует результат на Telegraph.
+
+Запуск (локально):  uvicorn bot:app --host 0.0.0.0 --port 8000
+Запуск (docker):    docker compose up -d --build
+Браузер:            http://<хост>:8000/
+"""
+
 import asyncio
 import html
 import json
 import logging
 import os
 import re
-import sys
+from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Optional, Union
+from typing import Optional
 
 import aiosqlite
 import feedparser
 import httpx
-from aiogram import BaseMiddleware, Bot, Dispatcher, F
-from aiogram.client.session.aiohttp import AiohttpSession
-from aiogram.exceptions import TelegramConflictError
-from aiogram.filters import Command
-from aiogram.types import CallbackQuery, ErrorEvent, Message
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from openai import AsyncOpenAI
+from pydantic import BaseModel
 
 import config
 
@@ -30,95 +39,71 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-# Детальные DEBUG-логи только для нашего модуля; библиотеки — INFO и выше,
-# чтобы не тонуть в DEBUG от aiosqlite/asyncio/apscheduler.
 logging.getLogger("trend_bot").setLevel(logging.DEBUG)
-logging.getLogger("aiogram.event").setLevel(logging.WARNING)
 logging.getLogger("aiosqlite").setLevel(logging.WARNING)
 logging.getLogger("apscheduler").setLevel(logging.INFO)
-logging.getLogger("asyncio").setLevel(logging.INFO)
 logger = logging.getLogger("trend_bot")
+
+
+def _cleanup_proxy_env() -> None:
+    """Убираем системные прокси-переменные из окружения процесса.
+
+    httpx по умолчанию включает trust_env=True и сам подхватывает эти
+    переменные, из-за чего прокси молча применился бы ко ВСЕМ запросам.
+    Прокси управляется ТОЛЬКО через PROXY_URL в config.py.
+    """
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                "http_proxy", "https_proxy", "all_proxy"):
+        os.environ.pop(var, None)
+
+
+_cleanup_proxy_env()
 
 # ========================================================================
 # 1. ИНИЦИАЛИЗАЦИЯ
 # ========================================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    logger.critical("BOT_TOKEN не задан. Укажи переменную окружения BOT_TOKEN.")
-    sys.exit(1)
-
-PROXY_URL = os.getenv("PROXY_URL")
-DB_PATH = os.getenv("DB_PATH", "/app/db/bot.db")
+DB_PATH = config.DB_PATH
 
 
-def _cleanup_proxy_env() -> None:
-    """Убираем HTTP_PROXY/HTTPS_PROXY/ALL_PROXY из окружения процесса.
-
-    aiohttp (движок aiogram-сессии) по умолчанию включает trust_env=True и
-    сам подхватывает эти переменные, из-за чего прокси молча применяется ко
-    ВСЕМ запросам (Telegram, GitHub, Google News, DeepSeek). При
-    network_mode: "host" адрес host.docker.internal на Linux не резолвится —
-    все запросы падают. Прокси управляется ТОЛЬКО через PROXY_URL внутри
-    aiogram-сессии, остальные переменные удаляем.
-    """
-    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
-                "http_proxy", "https_proxy", "all_proxy"):
-        value = os.environ.pop(var, None)
-        if value:
-            logger.warning(
-                "Переменная %s=%s удалена из окружения: прокси задаётся только через PROXY_URL.",
-                var, value,
-            )
+def _make_httpx_client(timeout: float = 20.0) -> httpx.AsyncClient:
+    """HTTP-клиент: через PROXY_URL (sing-box), если он задан, иначе напрямую."""
+    if config.PROXY_URL:
+        return httpx.AsyncClient(proxy=config.PROXY_URL, timeout=timeout)
+    return httpx.AsyncClient(timeout=timeout)
 
 
-class ProxySession(AiohttpSession):
-    """Сессия aiogram, работающая через HTTP-прокси (sing-box).
+# LLM: OpenAI-совместимый клиент (DeepSeek). Проксируется так же, как всё
+# остальное, через кастомный http_client. Если ключ не задан — llm=None,
+# все LLM-функции деградируют до fallback-веток.
+if config.LLM_API_KEY:
+    _llm_http = httpx.AsyncClient(
+        proxy=config.PROXY_URL if config.PROXY_URL else None,
+        timeout=httpx.Timeout(120.0, connect=30.0),
+    )
+    llm: Optional[AsyncOpenAI] = AsyncOpenAI(
+        api_key=config.LLM_API_KEY,
+        base_url=config.LLM_BASE_URL,
+        http_client=_llm_http,
+    )
+else:
+    llm = None
+    logger.warning("DEEPSEEK_API_KEY не задан — LLM-функции будут использовать fallback.")
 
-    В aiogram >= 3.13 аргумент proxy= в AiohttpSession строит
-    aiohttp-socks ProxyConnector, который направляет запросы к
-    api.telegram.org через CONNECT-туннель прокси. Переопределять
-    make_request/create_session не нужно: make_request() вызывает
-    session.post(url, data=form, timeout=...) БЕЗ параметра proxy=,
-    прокси применяется на уровне connector.
+# Состояние веб-панели (в памяти; БД хранит историю)
+pending_items: list[dict] = []                 # последний сырой сбор трендов
+plans_store: dict[int, list[dict]] = {}        # topic_id -> сгенерированные планы
+factcheck_store: dict[int, str] = {}           # article_id -> отчёт фактчекинга
+published_urls: dict[int, str] = {}            # article_id -> url Telegraph
+state = {
+    "last_collect": None,
+    "last_collect_count": 0,
+    "last_rank": None,
+    "last_daily": None,
+}
 
-    ВАЖНО: request_timeout, переданный в Bot(...), игнорируется,
-    когда сессия задана явно (в aiogram.client.bot.Bot.__init__ его
-    обработка отсутствует). Поэтому таймаут задаётся здесь — в
-    конструкторе сессии (BaseSession.timeout).
-    """
+scheduler: Optional[AsyncIOScheduler] = None
 
-    def __init__(self, proxy_url: str, timeout: float = 60.0):
-        super().__init__(proxy=proxy_url, timeout=timeout)
-        logger.info("Прокси-сессия создана: %s (таймаут %ss)", proxy_url, timeout)
-
-
-def _build_session(proxy_url: Optional[str]) -> AiohttpSession:
-    if proxy_url:
-        return ProxySession(proxy_url)
-    logger.warning("PROXY_URL не задан — прямое подключение к Telegram API.")
-    return AiohttpSession(timeout=60.0)
-
-
-def _new_bot() -> Bot:
-    return Bot(token=BOT_TOKEN, session=_build_session(PROXY_URL))
-
-
-_cleanup_proxy_env()
-bot = _new_bot()
-dp = Dispatcher()
-try:
-    scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
-except Exception:
-    scheduler = AsyncIOScheduler()
-
-llm = AsyncOpenAI(
-    api_key=config.LLM_API_KEY,
-    base_url=config.LLM_BASE_URL,
-)
-
-pending_topics = {}
-pending_plans = {}
-pending_articles = {}
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 # ========================================================================
 # 2. БАЗА ДАННЫХ
@@ -165,20 +150,104 @@ async def db_init() -> None:
         logger.error("Не удалось инициализировать БД: %s", exc)
 
 
-async def save_topics(topics: list[dict]) -> None:
+async def save_topics(topics: list[dict]) -> list[int]:
+    """Сохраняет темы в БД и возвращает их id."""
+    ids: list[int] = []
     if not topics:
-        return
+        return ids
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             now = datetime.now().isoformat()
-            await db.executemany(
-                "INSERT INTO topics (date, title, source, status) VALUES (?, ?, ?, 'new')",
-                [(now, t["title"], t["source"]) for t in topics],
-            )
+            for t in topics:
+                cur = await db.execute(
+                    "INSERT INTO topics (date, title, source, status) VALUES (?, ?, ?, 'new')",
+                    (now, t["title"], t["source"]),
+                )
+                ids.append(int(cur.lastrowid))
             await db.commit()
         logger.info("Сохранено тем в БД: %d", len(topics))
     except Exception as exc:
         logger.error("Ошибка сохранения тем в БД: %s", exc)
+    return ids
+
+
+async def list_topics(limit: int = 50) -> list[dict]:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM topics ORDER BY id DESC LIMIT ?", (limit,)
+            )
+            return [dict(r) for r in await cur.fetchall()]
+    except Exception as exc:
+        logger.error("Ошибка чтения тем: %s", exc)
+        return []
+
+
+async def get_topic(topic_id: int) -> Optional[dict]:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM topics WHERE id = ?", (topic_id,))
+            row = await cur.fetchone()
+            return dict(row) if row else None
+    except Exception as exc:
+        logger.error("Ошибка чтения темы %s: %s", topic_id, exc)
+        return None
+
+
+async def save_article(topic_id: int, platform: str, content: str) -> int:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                "INSERT INTO articles (topic_id, platform, content, status, created_at) "
+                "VALUES (?, ?, ?, 'draft', ?)",
+                (topic_id, platform, content, datetime.now().isoformat()),
+            )
+            await db.commit()
+            return int(cur.lastrowid)
+    except Exception as exc:
+        logger.error("Ошибка сохранения статьи: %s", exc)
+        return 0
+
+
+async def get_article(article_id: int) -> Optional[dict]:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM articles WHERE id = ?", (article_id,))
+            row = await cur.fetchone()
+            return dict(row) if row else None
+    except Exception as exc:
+        logger.error("Ошибка чтения статьи %s: %s", article_id, exc)
+        return None
+
+
+async def list_articles(limit: int = 50) -> list[dict]:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT a.*, t.title AS topic_title FROM articles a "
+                "LEFT JOIN topics t ON a.topic_id = t.id "
+                "ORDER BY a.id DESC LIMIT ?",
+                (limit,),
+            )
+            return [dict(r) for r in await cur.fetchall()]
+    except Exception as exc:
+        logger.error("Ошибка чтения статей: %s", exc)
+        return []
+
+
+async def update_article_status(article_id: int, status: str) -> None:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE articles SET status = ? WHERE id = ?", (status, article_id)
+            )
+            await db.commit()
+    except Exception as exc:
+        logger.error("Ошибка обновления статуса статьи: %s", exc)
 
 
 async def save_application(app: dict) -> None:
@@ -200,6 +269,28 @@ async def save_application(app: dict) -> None:
     except Exception as exc:
         logger.error("Ошибка сохранения заявки в БД: %s", exc)
 
+
+async def list_applications(limit: int = 100) -> list[dict]:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM applications ORDER BY id DESC LIMIT ?", (limit,)
+            )
+            return [dict(r) for r in await cur.fetchall()]
+    except Exception as exc:
+        logger.error("Ошибка чтения заявок: %s", exc)
+        return []
+
+
+async def delete_application(app_id: int) -> None:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM applications WHERE id = ?", (app_id,))
+            await db.commit()
+    except Exception as exc:
+        logger.error("Ошибка удаления заявки %s: %s", app_id, exc)
+
 # ========================================================================
 # 3. СБОР ТРЕНДОВ
 # ========================================================================
@@ -207,10 +298,8 @@ async def save_application(app: dict) -> None:
 async def fetch_hackernews_top(limit: int = 30) -> list[dict]:
     items = []
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.get(
-                "https://hacker-news.firebaseio.com/v0/topstories.json"
-            )
+        async with _make_httpx_client(15) as client:
+            r = await client.get("https://hacker-news.firebaseio.com/v0/topstories.json")
             r.raise_for_status()
             ids = r.json()[:limit]
             for sid in ids:
@@ -242,7 +331,7 @@ async def fetch_github_trending(limit: int = 15) -> list[dict]:
     queries = ["messaging", "chat", "collaboration", "real-time", "communication"]
     items = []
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with _make_httpx_client(15) as client:
             for q in queries:
                 try:
                     r = await client.get(
@@ -275,9 +364,13 @@ async def fetch_github_trending(limit: int = 15) -> list[dict]:
 
 
 async def fetch_google_news_rss(query: str = "IT trends messaging") -> list[dict]:
+    """Google News RSS через наш HTTP-клиент (прокси-совместимый), затем парсинг."""
     try:
         url = f"https://news.google.com/rss/search?q={query}&hl=ru&gl=RU"
-        feed = await asyncio.to_thread(feedparser.parse, url)
+        async with _make_httpx_client(20) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+        feed = await asyncio.to_thread(feedparser.parse, r.text)
         items = []
         for entry in feed.entries[:10]:
             items.append({
@@ -323,6 +416,9 @@ async def collect_trends() -> list[dict]:
 async def llm_filter_topics(items: list[dict]) -> list[dict]:
     if not items:
         return []
+    if llm is None:
+        logger.warning("LLM не настроен — пропускаю фильтрацию, беру первые 5")
+        return items[:5]
     items_text = "\n".join(
         f"{i+1}. {it['title']} (источник: {it['source']})"
         for i, it in enumerate(items[:40])
@@ -358,7 +454,7 @@ async def llm_filter_topics(items: list[dict]) -> list[dict]:
         for p in parsed:
             idx = p.get("original_index", 0) - 1
             if 0 <= idx < len(items):
-                it = items[idx]
+                it = dict(items[idx])
                 it["reason"] = p.get("reason", "")
                 result.append(it)
         logger.info("LLM отобрал тем: %d", len(result))
@@ -371,7 +467,18 @@ async def llm_filter_topics(items: list[dict]) -> list[dict]:
 # 5. LLM: ГЕНЕРАЦИЯ ПЛАНОВ СТАТЕЙ
 # ========================================================================
 
+def _fallback_plans(title: str) -> list[dict]:
+    return [
+        {"variant": "А", "title": title, "points": ["вступление", "разбор", "выводы"]},
+        {"variant": "Б", "title": title, "points": ["введение", "инструкция", "результат"]},
+        {"variant": "В", "title": title, "points": ["тезис", "аргументы", "призыв"]},
+    ]
+
+
 async def generate_plans(topic: dict, platform_style: str) -> list[dict]:
+    if llm is None:
+        logger.warning("LLM не настроен — возвращаю шаблонные планы")
+        return _fallback_plans(topic["title"])
     prompt = f"""Тема: {topic['title']}
 Источник: {topic['url']}
 Стиль для платформы: {platform_style}
@@ -393,11 +500,7 @@ async def generate_plans(topic: dict, platform_style: str) -> list[dict]:
         )
     except Exception as exc:
         logger.error("LLM-генерация планов не удалась: %s", exc)
-        return [
-            {"variant": "А", "title": topic["title"], "points": ["вступление", "разбор", "выводы"]},
-            {"variant": "Б", "title": topic["title"], "points": ["введение", "инструкция", "результат"]},
-            {"variant": "В", "title": topic["title"], "points": ["тезис", "аргументы", "призыв"]},
-        ]
+        return _fallback_plans(topic["title"])
     try:
         raw = resp.choices[0].message.content
         start = raw.find("[")
@@ -407,17 +510,16 @@ async def generate_plans(topic: dict, platform_style: str) -> list[dict]:
         return plans
     except Exception as exc:
         logger.warning("LLM вернул некорректный JSON для планов, fallback: %s", exc)
-        return [
-            {"variant": "А", "title": topic["title"], "points": ["вступление", "разбор", "выводы"]},
-            {"variant": "Б", "title": topic["title"], "points": ["введение", "инструкция", "результат"]},
-            {"variant": "В", "title": topic["title"], "points": ["тезис", "аргументы", "призыв"]},
-        ]
+        return _fallback_plans(topic["title"])
 
 # ========================================================================
 # 6. LLM: ГЕНЕРАЦИЯ СТАТЬИ + ФАКТЧЕКИНГ
 # ========================================================================
 
 async def generate_article(topic: dict, plan: dict, platform_style: str) -> str:
+    if llm is None:
+        logger.warning("LLM не настроен — статья не может быть сгенерирована")
+        return ""
     points = "\n".join(f"  {i+1}. {p}" for i, p in enumerate(plan["points"]))
     prompt = f"""Напиши статью для IT-блога.
 
@@ -430,7 +532,7 @@ async def generate_article(topic: dict, plan: dict, platform_style: str) -> str:
 Требования:
 - Объём: 1500-3000 слов
 - Вставь ссылки на источники в формате [1], [2] и т.д.
-- В конце добавь призыв к сообществу: мы строим корпоративный мессенджер, ищем разработчиков и энтузиастов. Напиши боту.
+- В конце добавь призыв к сообществу: мы строим корпоративный мессенджер, ищем разработчиков и энтузиастов.
 - Текст в HTML-разметке (h2, p, a, ul, li, strong)"""
     try:
         resp = await llm.chat.completions.create(
@@ -450,6 +552,8 @@ async def generate_article(topic: dict, plan: dict, platform_style: str) -> str:
 
 
 async def fact_check(article: str) -> str:
+    if llm is None:
+        return "⚠️ Фактчекинг недоступен: LLM не настроен (DEEPSEEK_API_KEY)."
     prompt = f"""Проверь статью на ошибки. Для каждого утверждения:
 1. Подтверждается ли фактами?
 2. Есть ли логические противоречия?
@@ -474,7 +578,7 @@ async def fact_check(article: str) -> str:
         return "⚠️ Фактчекинг временно недоступен (ошибка LLM). Проверь статью вручную."
 
 # ========================================================================
-# 7. ПУБЛИКАЦИЯ
+# 7. ПУБЛИКАЦИЯ НА TELEGRAPH
 # ========================================================================
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -486,40 +590,29 @@ def _strip_html(text: str) -> str:
     return html.unescape(_TAG_RE.sub(" ", text)).strip()
 
 
-async def publish_to_telegram(article_html: str) -> Optional[str]:
-    try:
-        plain = html.escape(_strip_html(article_html)[:500]) + "..."
-        await bot.send_message(
-            chat_id=config.CHANNEL_ID,
-            text=plain,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-        logger.info("Анонс опубликован в канал %s", config.CHANNEL_ID)
-        return "ok"
-    except Exception as exc:
-        logger.error("Ошибка публикации в TG-канал: %s", exc)
-        return None
+_telegraph_token: Optional[str] = None
 
 
 async def publish_to_telegraph(title: str, content_html: str) -> Optional[str]:
+    global _telegraph_token
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.post(
-                "https://api.telegra.ph/createAccount",
-                data={"short_name": "IT Trends", "author_name": "Trend Bot"},
-            )
-            r.raise_for_status()
-            token = r.json().get("result", {}).get("access_token")
-            if not token:
-                logger.error("Telegraph: не получен access_token")
-                return None
+        async with _make_httpx_client(15) as client:
+            if not _telegraph_token:
+                r = await client.post(
+                    "https://api.telegra.ph/createAccount",
+                    data={"short_name": "IT Trends", "author_name": "Trend Scanner"},
+                )
+                r.raise_for_status()
+                _telegraph_token = r.json().get("result", {}).get("access_token")
+                if not _telegraph_token:
+                    logger.error("Telegraph: не получен access_token")
+                    return None
             r2 = await client.post(
                 "https://api.telegra.ph/createPage",
                 data={
-                    "access_token": token,
+                    "access_token": _telegraph_token,
                     "title": title[:256],
-                    "author_name": "Trend Bot",
+                    "author_name": "Trend Scanner",
                     "content": json.dumps([{"tag": "p", "html": content_html}]),
                 },
             )
@@ -532,319 +625,27 @@ async def publish_to_telegraph(title: str, content_html: str) -> Optional[str]:
         return None
 
 # ========================================================================
-# 8. TELEGRAM-БОТ: ОБРАБОТЧИКИ
+# 8. ПЛАНИРОВЩИК
 # ========================================================================
 
-class LoggingMiddleware(BaseMiddleware):
-    async def __call__(
-        self,
-        handler: Callable[
-            [Union[Message, CallbackQuery], dict[str, Any]],
-            Awaitable[Any],
-        ],
-        event: Union[Message, CallbackQuery],
-        data: dict[str, Any],
-    ) -> Any:
-        user = getattr(event, "from_user", None)
-        user_desc = f"{user.full_name} (id={user.id})" if user else "?"
-        if isinstance(event, Message):
-            logger.info(
-                "Получено сообщение от %s: %s",
-                user_desc,
-                (event.text or "")[:200],
-            )
-        else:
-            logger.info("Получен callback от %s: %s", user_desc, event.data)
-
-        try:
-            return await handler(event, data)
-        except Exception as exc:
-            logger.exception("Ошибка при обработке события: %s", exc)
-            try:
-                if isinstance(event, Message):
-                    await event.answer("⚠️ Что-то пошло не так. Попробуйте ещё раз.")
-                elif isinstance(event, CallbackQuery):
-                    await event.answer("⚠️ Ошибка при обработке. Попробуйте ещё раз.", show_alert=False)
-            except Exception:
-                pass
-            return None
-
-
-dp.message.middleware(LoggingMiddleware())
-dp.callback_query.middleware(LoggingMiddleware())
-
-
-@dp.errors()
-async def errors_handler(event: ErrorEvent) -> None:
-    logger.exception("Ошибка обработки апдейта: %s", event.exception)
-
-
-@dp.message(Command("start"))
-async def cmd_start(msg: Message):
-    if msg.from_user.id == config.ADMIN_ID:
-        await msg.answer(
-            "👋 Привет! Я бот трендов.\n\n"
-            "/trends — собрать темы прямо сейчас\n"
-            "/help — справка"
-        )
-    else:
-        await msg.answer(
-            "👋 Мы строим корпоративный мессенджер!\n\n"
-            "Чем интересуешься?",
-            reply_markup=InlineKeyboardBuilder()
-            .button(text="💻 Разработка", callback_data="collab_dev")
-            .button(text="🎨 Дизайн", callback_data="collab_design")
-            .button(text="📊 Продакт", callback_data="collab_product")
-            .button(text="🤝 Партнёрство", callback_data="collab_partner")
-            .as_markup(),
-        )
-
-
-@dp.message(Command("trends"))
-async def cmd_trends(msg: Message):
-    if msg.from_user.id != config.ADMIN_ID:
-        return
-    logger.info("Команда /trends от админа %s", msg.from_user.id)
-    await msg.answer("⏳ Собираю тренды...")
-    try:
-        items = await collect_trends()
-        if not items:
-            await msg.answer("❌ Не удалось собрать тренды. Проверь подключение.")
-            return
-        top = await llm_filter_topics(items)
-        if not top:
-            await msg.answer("❌ LLM не отдал темы. Проверь API-ключ DeepSeek.")
-            return
-        await save_topics(top)
-        kb = InlineKeyboardBuilder()
-        for i, t in enumerate(top):
-            kb.button(text=f"✅ Тема {i+1}", callback_data=f"topic_{i}")
-        kb.adjust(3)
-        text = "\n\n".join(
-            f"📝 Тема {i+1}: «{t['title']}»\n   Источник: {t['source']} | Очки: {t.get('score', 0)}"
-            for i, t in enumerate(top)
-        )
-        sent = await msg.answer(f"📰 Темы дня:\n\n{text}", reply_markup=kb.as_markup())
-        pending_topics[sent.message_id] = top
-        logger.info("Темы отправлены админу: %d шт.", len(top))
-    except Exception as exc:
-        logger.exception("Ошибка в /trends: %s", exc)
-        await msg.answer("⚠️ Ошибка при сборе трендов. Подробности в логах.")
-
-
-@dp.callback_query(F.data.startswith("topic_"))
-async def cb_topic(cb: CallbackQuery):
-    try:
-        idx = int(cb.data.split("_")[1])
-    except (ValueError, IndexError):
-        await cb.answer("Некорректные данные")
-        return
-    if not cb.message:
-        await cb.answer("Сообщение недоступно")
-        return
-    try:
-        topics = pending_topics.get(cb.message.message_id, [])
-        if idx >= len(topics):
-            await cb.answer("Тема не найдена")
-            return
-        topic = topics[idx]
-        weekday = datetime.now().weekday()
-        style_info = config.PLATFORM_STYLES.get(weekday, config.PLATFORM_STYLES[0])
-        platform = style_info["platform"]
-        style = style_info["style"]
-        await cb.answer("Генерирую планы...")
-        plans = await generate_plans(topic, style)
-        kb = InlineKeyboardBuilder()
-        for i, p in enumerate(plans):
-            kb.button(text=f"✅ План {p['variant']}", callback_data=f"plan_{i}")
-        kb.adjust(3)
-        text = f"Тема: «{topic['title']}»\nПлатформа: {platform} | Стиль: {style}\n\n"
-        for p in plans:
-            text += f"\n📌 План {p['variant']}: {p['title']}\n"
-            for pt in p["points"]:
-                text += f"   • {pt}\n"
-        sent = await cb.message.answer(text, reply_markup=kb.as_markup())
-        pending_plans[sent.message_id] = {
-            "topic": topic,
-            "plans": plans,
-            "platform": platform,
-            "style": style,
-        }
-        logger.info("Планы сгенерированы для темы «%s»", topic["title"])
-    except Exception as exc:
-        logger.exception("Ошибка в cb_topic: %s", exc)
-        await cb.answer("⚠️ Ошибка при генерации планов.", show_alert=False)
-
-
-@dp.callback_query(F.data.startswith("plan_"))
-async def cb_plan(cb: CallbackQuery):
-    try:
-        idx = int(cb.data.split("_")[1])
-    except (ValueError, IndexError):
-        await cb.answer("Некорректные данные")
-        return
-    if not cb.message:
-        await cb.answer("Сообщение недоступно")
-        return
-    try:
-        data = pending_plans.get(cb.message.message_id, {})
-        if not data or idx >= len(data.get("plans", [])):
-            await cb.answer("Данные устарели")
-            return
-        topic = data["topic"]
-        plan = data["plans"][idx]
-        platform = data["platform"]
-        style = data["style"]
-        await cb.answer("Генерирую статью...")
-        article = await generate_article(topic, plan, style)
-        if not article:
-            await cb.message.answer("❌ Не удалось сгенерировать статью. Попробуй ещё раз.")
-            return
-        await cb.message.answer("🔍 Запускаю фактчекинг...")
-        report = await fact_check(article)
-        kb = InlineKeyboardBuilder()
-        kb.button(text="✅ Опубликовать", callback_data="pub")
-        kb.button(text="✏️ На доработку", callback_data="rework")
-        text = f"📄 Статья готова ({len(article)} символов)\nПлатформа: {platform}\n\n🔍 Отчёт фактчекинга:\n{report[:2000]}"
-        sent = await cb.message.answer(text, reply_markup=kb.as_markup())
-        pending_articles[sent.message_id] = {
-            "article": article,
-            "factcheck": report,
-            "topic": topic,
-            "plan": plan,
-            "platform": platform,
-        }
-        logger.info("Статья для платформы %s подготовлена (%d симв.)", platform, len(article))
-    except Exception as exc:
-        logger.exception("Ошибка в cb_plan: %s", exc)
-        await cb.answer("⚠️ Ошибка при генерации статьи.", show_alert=False)
-
-
-@dp.callback_query(F.data == "pub")
-async def cb_publish(cb: CallbackQuery):
-    data = pending_articles.get(cb.message.message_id, {}) if cb.message else {}
-    if not data:
-        await cb.answer("Данные устарели")
-        return
-    article = data["article"]
-    topic = data["topic"]
-    platform = data["platform"]
-    try:
-        if platform == "telegram":
-            url = await publish_to_telegraph(topic["title"], article)
-            res = await publish_to_telegram(article)
-            if url:
-                await cb.message.answer(f"✅ Опубликовано в Telegram-канал + Telegraph: {url}")
-            elif res == "ok":
-                await cb.message.answer("✅ Опубликовано в Telegram-канал (Telegraph: не удалось создать страницу).")
-            else:
-                await cb.message.answer("❌ Не удалось опубликовать. Подробности в логах.")
-        else:
-            await cb.message.answer(
-                f"📄 Текст для {platform} готов. Скопируй и опубликуй вручную:\n\n{article[:3500]}"
-            )
-        logger.info("Публикация завершена для платформы %s", platform)
-    except Exception as exc:
-        logger.exception("Ошибка публикации: %s", exc)
-        await cb.message.answer("⚠️ Ошибка при публикации. Подробности в логах.")
-
-
-@dp.callback_query(F.data == "rework")
-async def cb_rework(cb: CallbackQuery):
-    await cb.message.answer("✏️ Напиши, что исправить (ответь на это сообщение):")
-
-# ========================================================================
-# 9. ОБРАБОТКА ЗАЯВОК ОТ ЧИТАТЕЛЕЙ
-# ========================================================================
-
-collab_state = {}
-
-@dp.callback_query(F.data.startswith("collab_"))
-async def cb_collab(cb: CallbackQuery):
-    role_map = {
-        "collab_dev": "Разработка",
-        "collab_design": "Дизайн",
-        "collab_product": "Продакт",
-        "collab_partner": "Партнёрство",
-    }
-    role = role_map.get(cb.data, "Не указано")
-    collab_state[cb.from_user.id] = {"role": role, "step": "name"}
-    logger.info("Читатель %s начал заявку: роль «%s»", cb.from_user.id, role)
-    await cb.message.answer("Как вас зовут?")
-
-
-@dp.message(F.text)
-async def handle_collab(msg: Message):
-    if msg.from_user.id == config.ADMIN_ID:
-        return
-    state = collab_state.get(msg.from_user.id)
-    if not state:
-        return
-    if state["step"] == "name":
-        state["name"] = msg.text
-        state["step"] = "skills"
-        await msg.answer("Какие у вас навыки / стек?")
-    elif state["step"] == "skills":
-        state["skills"] = msg.text
-        state["step"] = "contact"
-        await msg.answer("Ваш контакт (Telegram или почта)?")
-    elif state["step"] == "contact":
-        state["contact"] = msg.text
-        await save_application(state)
-        try:
-            await bot.send_message(
-                config.ADMIN_ID,
-                f"🔔 Новая заявка!\n👤 {state['name']}\n💼 {state['role']}\n"
-                f"🛠 {state['skills']}\n📫 {state['contact']}"
-            )
-        except Exception as exc:
-            logger.error("Не удалось уведомить админа о заявке: %s", exc)
-        await msg.answer("✅ Заявка отправлена! Мы свяжемся с вами.")
-        collab_state.pop(msg.from_user.id, None)
-        logger.info("Заявка читателя %s обработана полностью.", msg.from_user.id)
-
-# ========================================================================
-# 10. ПЛАНИРОВЩИК
-# ========================================================================
-
-async def daily_trends():
+async def daily_trends() -> None:
     logger.info("Ежедневная задача: сбор трендов начат")
+    state["last_daily"] = datetime.now().isoformat()
     try:
-        await bot.send_message(config.ADMIN_ID, "⏳ Ежедневный сбор трендов запущен...")
         items = await collect_trends()
         if not items:
-            await bot.send_message(config.ADMIN_ID, "❌ Тренды не собраны сегодня.")
+            logger.warning("Ежедневная задача: тренды не собраны")
             return
         top = await llm_filter_topics(items)
-        await save_topics(top)
-        kb = InlineKeyboardBuilder()
-        for i, t in enumerate(top):
-            kb.button(text=f"✅ Тема {i+1}", callback_data=f"topic_{i}")
-        kb.adjust(3)
-        text = "\n\n".join(
-            f"📝 Тема {i+1}: «{t['title']}»\n   Источник: {t['source']}"
-            for i, t in enumerate(top)
-        )
-        sent = await bot.send_message(
-            config.ADMIN_ID,
-            f"📰 Темы дня ({datetime.now().strftime('%d.%m')}):\n\n{text}",
-            reply_markup=kb.as_markup(),
-        )
-        pending_topics[sent.message_id] = top
-        logger.info("Ежедневная задача завершена: отправлено %d тем", len(top))
+        if top:
+            await save_topics(top)
+        logger.info("Ежедневная задача завершена: сохранено тем: %d", len(top))
     except Exception as exc:
         logger.exception("Ошибка в ежедневном сборе трендов: %s", exc)
 
-# ========================================================================
-# 11. ЗАПУСК
-# ========================================================================
 
 def _install_asyncio_exception_handler() -> None:
-    """Логируем НЕОБРАБОТАННЫЕ исключения из фоновых asyncio-задач.
-
-    Именно они чаще всего роняют polling «молча»: без этого хендлера трейсбек
-    уходит в stderr нечитаемым куском либо теряется вовсе.
-    """
+    """Логируем необработанные исключения из фоновых asyncio-задач."""
     loop = asyncio.get_running_loop()
 
     def _handler(_loop: asyncio.AbstractEventLoop, context: dict) -> None:
@@ -859,28 +660,14 @@ def _install_asyncio_exception_handler() -> None:
     loop.set_exception_handler(_handler)
 
 
-async def _ensure_bot_online(current_bot: Bot) -> bool:
-    """Проверяем доступность Telegram API через текущую сессию (≤10 сек).
-
-    getMe — самый лёгкий метод: если он проходит, прокси и токен в порядке.
-    """
-    try:
-        me = await asyncio.wait_for(current_bot.get_me(), timeout=10)
-        logger.info("Telegram API доступен: @%s (id=%s)", me.username, me.id)
-        return True
-    except Exception as exc:
-        logger.error("Telegram API недоступен через текущую сессию: %s", exc)
-        return False
-
-
-async def main():
-    global bot
-
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    global scheduler
     _install_asyncio_exception_handler()
     await db_init()
-
     try:
         hour, minute = config.TRENDS_TIME.split(":")
+        scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
         scheduler.add_job(
             daily_trends,
             "cron",
@@ -893,68 +680,226 @@ async def main():
         logger.info("Планировщик запущен: ежедневный сбор трендов в %s", config.TRENDS_TIME)
     except Exception as exc:
         logger.error("Не удалось настроить планировщик: %s", exc)
-
-    # --- Сброс webhook перед polling ---
-    # Если для токена установлен webhook, getUpdates НЕ получает апдейты —
-    # Telegram шлёт их на webhook-URL, а бот «молчит» без ошибок. Бот работает
-    # строго в polling-режиме, поэтому webhook принудительно удаляем на старте.
-    try:
-        wh = await bot.get_webhook_info()
-        logger.info(
-            "Webhook info: url=%r pending_updates=%s last_error=%r",
-            wh.url or "-",
-            wh.pending_update_count,
-            wh.last_error_message or "-",
-        )
-        if wh.url:
-            await bot.delete_webhook(drop_pending_updates=True)
-            logger.warning("Webhook %r удалён — апдейты пойдут через polling.", wh.url)
-    except Exception as exc:
-        logger.warning("Не удалось проверить/сбросить webhook: %s", exc)
-
-    # --- Проверка связи с Telegram до старта polling ---
-    online = await _ensure_bot_online(bot)
-    if not online and PROXY_URL:
-        # Прокси лежит — не роняем бота, переключаемся на прямое подключение.
-        logger.warning("Прокси %s недоступен — переключаюсь на прямое подключение...", PROXY_URL)
-        try:
-            await bot.session.close()
-        except Exception:
-            pass
-        bot = Bot(token=BOT_TOKEN, session=AiohttpSession(timeout=60.0))
-        online = await _ensure_bot_online(bot)
-    if not online:
-        logger.critical(
-            "Telegram API недоступен (прокси=%s). Проверь sing-box, токен и сеть. Завершение.",
-            PROXY_URL or "не задан",
-        )
-        sys.exit(1)
-
-    logger.info("🚀 Бот запущен. Стартую polling...")
-    try:
-        await dp.start_polling(bot)
-    except TelegramConflictError as exc:
-        logger.critical(
-            "CONFLICT 409: для этого токена уже работает другой экземпляр бота "
-            "(старый контейнер/процесс) либо установлен webhook — апдейты уходят "
-            "не нам. Останови все остальные экземпляры и перезапусти контейнер "
-            "(docker compose up -d --build --force-recreate). Причина: %s",
-            exc,
-        )
-        raise
-    except Exception as exc:
-        logger.exception("Polling завершился с ошибкой: %s", exc)
-        raise  # docker restart: unless-stopped перезапустит контейнер
-    finally:
+    yield
+    if scheduler:
         try:
             scheduler.shutdown(wait=False)
         except Exception:
             pass
-        logger.info("Бот остановлен, планировщик завершён.")
+        logger.info("Планировщик остановлен.")
 
+
+app = FastAPI(title="Trend Scanner", lifespan=lifespan)
+
+# ========================================================================
+# 9. WEB: СТРАНИЦЫ И API
+# ========================================================================
+
+class RankRequest(BaseModel):
+    items: Optional[list[dict]] = None  # если не передано — берём последний сбор
+
+
+class PlansRequest(BaseModel):
+    platform: str = "habr"
+
+
+class ArticleRequest(BaseModel):
+    topic_id: int
+    plan_index: int
+    platform: str = "habr"
+
+
+class ApplicationIn(BaseModel):
+    name: str
+    role: str
+    skills: str
+    contact: str
+
+
+@app.get("/")
+async def index() -> FileResponse:
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+
+@app.get("/api/status")
+async def api_status() -> dict:
+    next_run = None
+    if scheduler:
+        job = scheduler.get_job("daily_trends")
+        if job and job.next_run_time:
+            next_run = job.next_run_time.isoformat()
+    return {
+        "scheduler_running": bool(scheduler and scheduler.running),
+        "next_daily_run": next_run,
+        "trends_time": config.TRENDS_TIME,
+        "llm_configured": bool(config.LLM_API_KEY),
+        "llm_model": config.LLM_MODEL,
+        "proxy": config.PROXY_URL or None,
+        "state": state,
+    }
+
+
+@app.get("/api/platforms")
+async def api_platforms() -> dict:
+    return {"platforms": config.PLATFORMS}
+
+
+@app.post("/api/trends/collect")
+async def api_collect() -> dict:
+    global pending_items
+    logger.info("Запрос на сбор трендов из веб-панели")
+    items = await collect_trends()
+    pending_items = items
+    state["last_collect"] = datetime.now().isoformat()
+    state["last_collect_count"] = len(items)
+    return {"count": len(items), "items": items}
+
+
+@app.post("/api/topics/rank")
+async def api_rank(payload: RankRequest) -> dict:
+    global pending_items
+    items = payload.items if payload.items is not None else pending_items
+    if not items:
+        raise HTTPException(
+            400,
+            "Нет трендов для ранжирования. Сначала выполни «Собрать тренды».",
+        )
+    if llm is None:
+        raise HTTPException(400, "LLM не настроен: задай DEEPSEEK_API_KEY в .env.")
+    top = await llm_filter_topics(items)
+    if not top:
+        raise HTTPException(502, "LLM не вернул темы. Проверь ключ и сеть.")
+    ids = await save_topics(top)
+    pending_items = items
+    state["last_rank"] = datetime.now().isoformat()
+    topics = []
+    for tid, t in zip(ids, top):
+        topics.append({
+            "id": tid,
+            "title": t["title"],
+            "source": t["source"],
+            "score": t.get("score", 0),
+            "reason": t.get("reason", ""),
+            "url": t.get("url", ""),
+            "date": datetime.now().isoformat(),
+        })
+    return {"topics": topics}
+
+
+@app.get("/api/topics")
+async def api_topics() -> dict:
+    return {"topics": await list_topics(50)}
+
+
+@app.post("/api/topics/{topic_id}/plans")
+async def api_plans(topic_id: int, payload: PlansRequest) -> dict:
+    topic = await get_topic(topic_id)
+    if not topic:
+        raise HTTPException(404, "Тема не найдена")
+    pf = config.PLATFORM_MAP.get(payload.platform)
+    if not pf:
+        raise HTTPException(400, f"Неизвестная платформа: {payload.platform}")
+    logger.info("Генерация планов для темы %s (платформа %s)", topic_id, payload.platform)
+    plans = await generate_plans(topic, pf["style"])
+    plans_store[topic_id] = plans
+    return {
+        "topic": topic,
+        "platform": payload.platform,
+        "platform_name": pf["name"],
+        "style": pf["style"],
+        "plans": plans,
+    }
+
+
+@app.post("/api/articles/generate")
+async def api_generate(payload: ArticleRequest) -> dict:
+    topic = await get_topic(payload.topic_id)
+    if not topic:
+        raise HTTPException(404, "Тема не найдена")
+    plans = plans_store.get(payload.topic_id, [])
+    if not plans:
+        raise HTTPException(400, "Сначала сгенерируй планы для этой темы.")
+    if not (0 <= payload.plan_index < len(plans)):
+        raise HTTPException(400, "Некорректный индекс плана.")
+    pf = config.PLATFORM_MAP.get(payload.platform)
+    if not pf:
+        raise HTTPException(400, f"Неизвестная платформа: {payload.platform}")
+    plan = plans[payload.plan_index]
+    logger.info("Генерация статьи для темы %s (план %s, платформа %s)",
+                payload.topic_id, plan.get("variant"), payload.platform)
+    article = await generate_article(topic, plan, pf["style"])
+    if not article:
+        raise HTTPException(502, "Не удалось сгенерировать статью. Проверь LLM-ключ и сеть.")
+    report = await fact_check(article)
+    article_id = await save_article(payload.topic_id, payload.platform, article)
+    factcheck_store[article_id] = report
+    return {
+        "id": article_id,
+        "topic_title": topic["title"],
+        "platform": payload.platform,
+        "platform_name": pf["name"],
+        "plan_variant": plan.get("variant"),
+        "plan_title": plan.get("title"),
+        "article": article,
+        "factcheck": report,
+    }
+
+
+@app.get("/api/articles")
+async def api_articles() -> dict:
+    articles = await list_articles(50)
+    for a in articles:
+        if a["id"] in factcheck_store:
+            a["factcheck"] = factcheck_store[a["id"]]
+        if a["id"] in published_urls:
+            a["published_url"] = published_urls[a["id"]]
+    return {"articles": articles}
+
+
+@app.post("/api/articles/{article_id}/publish")
+async def api_publish(article_id: int) -> dict:
+    art = await get_article(article_id)
+    if not art:
+        raise HTTPException(404, "Статья не найдена")
+    if article_id in published_urls:
+        return {"url": published_urls[article_id], "already": True}
+    topic = await get_topic(art["topic_id"]) if art.get("topic_id") else None
+    title = (topic or {}).get("title", "Статья")
+    url = await publish_to_telegraph(title, art["content"])
+    if not url:
+        raise HTTPException(502, "Не удалось опубликовать на Telegraph. Подробности в логах.")
+    published_urls[article_id] = url
+    await update_article_status(article_id, "published")
+    return {"url": url}
+
+
+@app.post("/api/applications")
+async def api_add_application(payload: ApplicationIn) -> dict:
+    data = payload.model_dump()
+    await save_application(data)
+    return {"ok": True}
+
+
+@app.get("/api/applications")
+async def api_applications() -> dict:
+    return {"applications": await list_applications(100)}
+
+
+@app.delete("/api/applications/{app_id}")
+async def api_delete_application(app_id: int) -> dict:
+    await delete_application(app_id)
+    return {"ok": True}
+
+
+# ========================================================================
+# 10. ЗАПУСК
+# ========================================================================
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Бот остановлен пользователем.")
+    import uvicorn
+
+    logger.info(
+        "Старт веб-панели на %s:%s (открой в браузере http://<хост>:%s/)",
+        config.WEB_HOST, config.WEB_PORT, config.WEB_PORT,
+    )
+    uvicorn.run("bot:app", host=config.WEB_HOST, port=config.WEB_PORT, log_level="info")

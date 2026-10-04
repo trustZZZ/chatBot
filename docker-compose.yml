@@ -4,23 +4,20 @@ services:
     container_name: trend-bot
     network_mode: "host"
     environment:
-      - BOT_TOKEN=${BOT_TOKEN}
-      - CHANNEL_ID=${CHANNEL_ID}
-      - ADMIN_ID=${ADMIN_ID}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       - LLM_BASE_URL=${LLM_BASE_URL}
+      - LLM_MODEL=${LLM_MODEL}
       - TZ=Europe/Moscow
-      # Прокси для Telegram API: sing-box на хосте, 127.0.0.1:8080.
-      # При network_mode: "host" 127.0.0.1 из контейнера = 127.0.0.1 хоста,
-      # host.docker.internal в host-режиме НЕ резолвится — не использовать!
-      #
-      # ВАЖНО: НЕ задаём HTTP_PROXY/HTTPS_PROXY/ALL_PROXY! aiohttp (движок
-      # aiogram-сессии) по умолчанию читает их (trust_env=True) и гонит через
-      # прокси ВСЕ запросы: Telegram, GitHub, Google News, DeepSeek.
-      # Прокси управляется только через PROXY_URL внутри aiogram-сессии
-      # (bot.py чистит эти переменные и при старте делает health-check getMe).
-      # Пустое значение PROXY_URL= в .env = прямое подключение без прокси.
+      - TRENDS_TIME=${TRENDS_TIME:-09:00}
+      # Прокси для внешних API (HackerNews, GitHub, Google News, DeepSeek,
+      # Telegraph): sing-box на хосте, 127.0.0.1:8080. При network_mode:
+      # "host" 127.0.0.1 из контейнера = 127.0.0.1 хоста, host.docker.internal
+      # НЕ резолвится — не использовать!
+      # Пустое значение (PROXY_URL=) = прямое подключение.
       - PROXY_URL=${PROXY_URL:-http://127.0.0.1:8080}
     volumes:
       - ./db:/app/db
     restart: unless-stopped
+
+# Открой в браузере: http://<IP_сервера>:8000/
+# (network_mode: "host" — приложение слушает порт 8000 прямо на хосте)
