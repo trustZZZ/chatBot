@@ -10,9 +10,9 @@ services:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       - LLM_BASE_URL=${LLM_BASE_URL}
       - TZ=Europe/Moscow
-      - PROXY_URL=http://127.0.0.1:8080
-      - HTTP_PROXY=http://127.0.0.1:8080
-      - HTTPS_PROXY=http://127.0.0.1:8080
+      # - PROXY_URL=http://127.0.0.1:8080
+      # - HTTP_PROXY=http://127.0.0.1:8080
+      # - HTTPS_PROXY=http://127.0.0.1:8080
     volumes:
       - ./db:/app/db
     restart: unless-stopped
