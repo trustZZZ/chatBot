@@ -49,12 +49,14 @@ if not BOT_TOKEN:
 PROXY_URL = os.getenv("PROXY_URL")
 DB_PATH = os.getenv("DB_PATH", "/app/db/bot.db")
 
+
 class ProxySession(AiohttpSession):
     """Сессия с поддержкой HTTP-прокси через trust_env."""
     async def get_session(self):
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(trust_env=True)
         return self._session
+
 
 def _build_session() -> Optional[AiohttpSession]:
     if PROXY_URL:
