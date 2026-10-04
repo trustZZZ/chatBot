@@ -47,20 +47,13 @@ PROXY_URL = os.getenv("PROXY_URL")
 DB_PATH = os.getenv("DB_PATH", "/app/db/bot.db")
 
 
-class ProxySession(AiohttpSession):
-    """Сессия с поддержкой HTTP-прокси через trust_env."""
-    async def get_session(self):
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(trust_env=True)
-        return self._session
-
-
 def _build_session() -> Optional[AiohttpSession]:
     if PROXY_URL:
         logger.info("Инициализация сессии с прокси: %s", PROXY_URL)
-        return ProxySession()
+        return AiohttpSession(proxy=PROXY_URL)
     logger.info("Прокси не задан — использую прямое подключение к Telegram API.")
     return None
+
 
 
 bot = Bot(token=BOT_TOKEN, session=_build_session())
