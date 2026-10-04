@@ -26,7 +26,7 @@ import config
 # 0. ЛОГИРОВАНИЕ
 # ========================================================================
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
@@ -58,13 +58,13 @@ class ProxySession(AiohttpSession):
 def _build_session() -> Optional[AiohttpSession]:
     if PROXY_URL:
         logger.info("Инициализация сессии с прокси через trust_env: %s", PROXY_URL)
-        return ProxySession()
-    logger.info("Прокси не задан — прямое подключение.")
+        return ProxySession(request_timeout=60)
     return None
 
 
-bot = Bot(token=BOT_TOKEN, session=_build_session())
+bot = Bot(token=BOT_TOKEN, session=_build_session(), request_timeout=60)
 dp = Dispatcher()
+
 try:
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 except Exception:
@@ -802,18 +802,6 @@ async def daily_trends():
 
 async def main():
     await db_init()
-
-    # Проверка прокси — логируем результат, но НЕ пересоздаём бота
-    if PROXY_URL:
-        try:
-            async with aiohttp.ClientSession(trust_env=True) as client:
-                async with client.get(
-                    "https://api.telegram.org",
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    logger.info("Прокси доступен (HTTP %s).", resp.status)
-        except Exception as exc:
-            logger.warning("Прокси недоступен: %s. Бот продолжит с прокси.", exc)
 
     try:
         hour, minute = config.TRENDS_TIME.split(":")
