@@ -8,4 +8,5 @@ openai>=1.0
 httpx>=0.27
 python-dotenv>=1.0
 tzdata>=2024.1
-aiohttp-socks
+# Прокси для aiogram AiohttpSession(proxy=...): ProxyConnector/ChainProxyConnector
+aiohttp-socks>=0.8

@@ -10,11 +10,13 @@ services:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       - LLM_BASE_URL=${LLM_BASE_URL}
       - TZ=Europe/Moscow
-      - HTTP_PROXY=http://host.docker.internal:8080
-      - HTTPS_PROXY=http://host.docker.internal:8080
-      # - PROXY_URL=http://127.0.0.1:8080
-      # - HTTP_PROXY=http://127.0.0.1:8080
-      # - HTTPS_PROXY=http://127.0.0.1:8080
+      # Прокси для Telegram API: sing-box на хосте, 127.0.0.1:8080.
+      # При network_mode: "host" 127.0.0.1 из контейнера = 127.0.0.1 хоста,
+      # host.docker.internal в host-режиме НЕ резолвится — не использовать.
+      - PROXY_URL=http://127.0.0.1:8080
+      - HTTP_PROXY=http://127.0.0.1:8080
+      - HTTPS_PROXY=http://127.0.0.1:8080
+      - NO_PROXY=localhost,127.0.0.1
     volumes:
       - ./db:/app/db
     restart: unless-stopped

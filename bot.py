@@ -8,7 +8,6 @@ import sys
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional, Union
 
-import aiohttp
 import aiosqlite
 import feedparser
 import httpx
@@ -46,22 +45,37 @@ DB_PATH = os.getenv("DB_PATH", "/app/db/bot.db")
 
 
 class ProxySession(AiohttpSession):
-    """Сессия с trust_env — читает HTTP_PROXY/HTTPS_PROXY из окружения."""
-    async def get_session(self):
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(trust_env=True)
-        return self._session
+    """Сессия aiogram, работающая через HTTP-прокси (sing-box).
+
+    В aiogram >= 3.13 аргумент proxy= в AiohttpSession строит
+    aiohttp-socks ProxyConnector, который направляет запросы к
+    api.telegram.org через CONNECT-туннель прокси. Переопределять
+    make_request/create_session не нужно: make_request() вызывает
+    session.post(url, data=form, timeout=...) БЕЗ параметра proxy=,
+    прокси применяется на уровне connector.
+
+    ВАЖНО: request_timeout, переданный в Bot(...), игнорируется,
+    когда сессия задана явно (в aiogram.client.bot.Bot.__init__ его
+    обработка отсутствует). Поэтому таймаут задаётся здесь — в
+    конструкторе сессии (BaseSession.timeout).
+    """
+
+    def __init__(self, proxy_url: str, timeout: float = 60.0):
+        super().__init__(proxy=proxy_url, timeout=timeout)
+        logger.info("Прокси-сессия создана: %s (таймаут %ss)", proxy_url, timeout)
 
 
 def _build_session() -> Optional[AiohttpSession]:
-    if PROXY_URL:
-        logger.info("Инициализация сессии с прокси через trust_env: %s", PROXY_URL)
-        return ProxySession()
-    logger.info("Прокси не задан — прямое подключение.")
-    return None
+    if not PROXY_URL:
+        logger.warning(
+            "PROXY_URL не задан — бот будет подключаться к Telegram напрямую. "
+            "На сервере в РФ это не работает: запросы будут висеть до таймаута."
+        )
+        return None
+    return ProxySession(PROXY_URL)
 
 
-bot = Bot(token=BOT_TOKEN, session=_build_session(), request_timeout=60)
+bot = Bot(token=BOT_TOKEN, session=_build_session())
 dp = Dispatcher()
 try:
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
