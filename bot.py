@@ -90,14 +90,14 @@ else:
     logger.warning("DEEPSEEK_API_KEY не задан — LLM-функции будут использовать fallback.")
 
 # Состояние веб-панели (в памяти; БД хранит историю)
-pending_items: list[dict] = []                 # последний сырой сбор трендов
+pending_items: list[dict] = []                 # последний сырой сбор трендов (для повторного использования)
+pending_topics: list[dict] = []                # последние темы, выделенные из сырого сбора
 plans_store: dict[int, list[dict]] = {}        # topic_id -> сгенерированные планы
 factcheck_store: dict[int, str] = {}           # article_id -> отчёт фактчекинга
 published_urls: dict[int, str] = {}            # article_id -> url Telegraph
 state = {
     "last_collect": None,
     "last_collect_count": 0,
-    "last_rank": None,
     "last_daily": None,
 }
 
@@ -114,6 +114,9 @@ _DB_SCHEMA = """
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT,
         title TEXT,
+        description TEXT,
+        sources TEXT,
+        source_count INTEGER DEFAULT 0,
         source TEXT,
         status TEXT DEFAULT 'new'
     );
@@ -126,15 +129,21 @@ _DB_SCHEMA = """
         created_at TEXT,
         FOREIGN KEY(topic_id) REFERENCES topics(id)
     );
-    CREATE TABLE IF NOT EXISTS applications (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT,
-        role TEXT,
-        skills TEXT,
-        contact TEXT,
-        created_at TEXT
-    );
 """
+
+
+async def _ensure_topic_columns(db) -> None:
+    """Миграция: добавляет новые колонки тем в уже существующую таблицу topics."""
+    cur = await db.execute("PRAGMA table_info(topics)")
+    cols = {row[1] for row in await cur.fetchall()}
+    for name, decl in (
+        ("description", "TEXT"),
+        ("sources", "TEXT"),
+        ("source_count", "INTEGER DEFAULT 0"),
+    ):
+        if name not in cols:
+            await db.execute(f"ALTER TABLE topics ADD COLUMN {name} {decl}")
+            logger.info("Миграция: добавлена колонка topics.%s", name)
 
 
 async def db_init() -> None:
@@ -144,14 +153,29 @@ async def db_init() -> None:
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.executescript(_DB_SCHEMA)
+            await _ensure_topic_columns(db)
             await db.commit()
         logger.info("База данных инициализирована: %s", DB_PATH)
     except Exception as exc:
         logger.error("Не удалось инициализировать БД: %s", exc)
 
 
+def _parse_topic_row(row: dict) -> dict:
+    """Превращает строку topics из БД в dict с распарсенными sources."""
+    row = dict(row)
+    try:
+        row["sources"] = json.loads(row.get("sources") or "[]")
+    except (TypeError, ValueError):
+        row["sources"] = []
+    return row
+
+
 async def save_topics(topics: list[dict]) -> list[int]:
-    """Сохраняет темы в БД и возвращает их id."""
+    """Сохраняет темы в БД и возвращает их id.
+
+    Принимает темы в формате extract_topics:
+    {topic, description, sources (list[str]), source_count}.
+    """
     ids: list[int] = []
     if not topics:
         return ids
@@ -159,13 +183,25 @@ async def save_topics(topics: list[dict]) -> list[int]:
         async with aiosqlite.connect(DB_PATH) as db:
             now = datetime.now().isoformat()
             for t in topics:
+                sources = t.get("sources") or []
+                title = (t.get("topic") or t.get("title") or "").strip()
+                if not title:
+                    continue
                 cur = await db.execute(
-                    "INSERT INTO topics (date, title, source, status) VALUES (?, ?, ?, 'new')",
-                    (now, t["title"], t["source"]),
+                    "INSERT INTO topics "
+                    "(date, title, description, sources, source_count, status) "
+                    "VALUES (?, ?, ?, ?, ?, 'new')",
+                    (
+                        now,
+                        title,
+                        (t.get("description") or "").strip(),
+                        json.dumps(sources, ensure_ascii=False),
+                        int(t.get("source_count") or len(sources)),
+                    ),
                 )
                 ids.append(int(cur.lastrowid))
             await db.commit()
-        logger.info("Сохранено тем в БД: %d", len(topics))
+        logger.info("Сохранено тем в БД: %d", len(ids))
     except Exception as exc:
         logger.error("Ошибка сохранения тем в БД: %s", exc)
     return ids
@@ -178,7 +214,8 @@ async def list_topics(limit: int = 50) -> list[dict]:
             cur = await db.execute(
                 "SELECT * FROM topics ORDER BY id DESC LIMIT ?", (limit,)
             )
-            return [dict(r) for r in await cur.fetchall()]
+            rows = [_parse_topic_row(dict(r)) for r in await cur.fetchall()]
+            return rows
     except Exception as exc:
         logger.error("Ошибка чтения тем: %s", exc)
         return []
@@ -190,7 +227,7 @@ async def get_topic(topic_id: int) -> Optional[dict]:
             db.row_factory = aiosqlite.Row
             cur = await db.execute("SELECT * FROM topics WHERE id = ?", (topic_id,))
             row = await cur.fetchone()
-            return dict(row) if row else None
+            return _parse_topic_row(dict(row)) if row else None
     except Exception as exc:
         logger.error("Ошибка чтения темы %s: %s", topic_id, exc)
         return None
@@ -249,47 +286,6 @@ async def update_article_status(article_id: int, status: str) -> None:
     except Exception as exc:
         logger.error("Ошибка обновления статуса статьи: %s", exc)
 
-
-async def save_application(app: dict) -> None:
-    try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "INSERT INTO applications (name, role, skills, contact, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (
-                    app["name"],
-                    app["role"],
-                    app["skills"],
-                    app["contact"],
-                    datetime.now().isoformat(),
-                ),
-            )
-            await db.commit()
-        logger.info("Заявка сохранена в БД: %s (%s)", app.get("name"), app.get("role"))
-    except Exception as exc:
-        logger.error("Ошибка сохранения заявки в БД: %s", exc)
-
-
-async def list_applications(limit: int = 100) -> list[dict]:
-    try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            cur = await db.execute(
-                "SELECT * FROM applications ORDER BY id DESC LIMIT ?", (limit,)
-            )
-            return [dict(r) for r in await cur.fetchall()]
-    except Exception as exc:
-        logger.error("Ошибка чтения заявок: %s", exc)
-        return []
-
-
-async def delete_application(app_id: int) -> None:
-    try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("DELETE FROM applications WHERE id = ?", (app_id,))
-            await db.commit()
-    except Exception as exc:
-        logger.error("Ошибка удаления заявки %s: %s", app_id, exc)
 
 # ========================================================================
 # 3. СБОР ТРЕНДОВ
@@ -410,58 +406,108 @@ async def collect_trends() -> list[dict]:
     return unique
 
 # ========================================================================
-# 4. LLM: ФИЛЬТРАЦИЯ И РАНЖИРОВАНИЕ ТЕМ
+# 4. LLM: ИЗВЛЕЧЕНИЕ ОБЩИХ ТЕМ ИЗ СЫРЫХ ТРЕНДОВ
 # ========================================================================
 
-async def llm_filter_topics(items: list[dict]) -> list[dict]:
-    if not items:
+_TOPICS_PROMPT = (
+    "Ты — редактор IT-блога. На основе списка свежих IT-новостей выдели общие темы, "
+    "которые можно развернуть в полноценную статью. Тема — это не заголовок новости, "
+    "а направление. Например: вместо 'GitHub выпустил новую фичу' → "
+    "'Как GitHub меняет workflow команд разработки'. "
+    'Верни JSON: [{"topic": "...", "description": "о чём статья", '
+    '"sources": ["ссылка1", "ссылка2"]}]'
+)
+
+
+def _norm_url(url: str) -> str:
+    return (url or "").strip().rstrip("/")
+
+
+def _fallback_topics(raw_items: list[dict]) -> list[dict]:
+    """Fallback без LLM: группируем статьи по источнику."""
+    groups: dict[str, list[dict]] = {}
+    for it in raw_items:
+        groups.setdefault(it.get("source", "News"), []).append(it)
+    result = []
+    for src, items in groups.items():
+        urls: list[str] = []
+        seen: set[str] = set()
+        for it in items:
+            u = it.get("url")
+            if u and u not in seen:
+                seen.add(u)
+                urls.append(u)
+        result.append({
+            "topic": f"Новости и события: {src}",
+            "description": f"Сводка из {len(items)} свежих материалов источника {src}.",
+            "sources": urls,
+            "source_count": len(urls),
+        })
+    return result
+
+
+async def extract_topics(raw_items: list[dict]) -> list[dict]:
+    """Группирует сырые статьи из collect_trends в общие темы через LLM.
+
+    Возвращает список: {topic, description, sources (реальные url), source_count}.
+    sources — реальные ссылки на статьи, из которых выведена тема
+    (они нужны позже для генерации статьи и фактчекинга).
+    """
+    if not raw_items:
         return []
     if llm is None:
-        logger.warning("LLM не настроен — пропускаю фильтрацию, беру первые 5")
-        return items[:5]
+        logger.warning("LLM не настроен — темы формируются по источникам (fallback)")
+        return _fallback_topics(raw_items)
     items_text = "\n".join(
-        f"{i+1}. {it['title']} (источник: {it['source']})"
-        for i, it in enumerate(items[:40])
+        f"{i + 1}. {it['title']} | {it.get('url', '')} | источник: {it.get('source', '')}"
+        for i, it in enumerate(raw_items[:60])
     )
-    prompt = f"""Ты — редактор IT-блога про корпоративные мессенджеры и командную работу.
-ЦА: разработчики, CTO, тимлиды, product-менеджеры.
-
-Отфильтруй и отранжируй темы, которые:
-1. Интересны этой аудитории
-2. Могут привлечь сообщество и обсуждение
-3. Связаны с IT, коммуникациями, разработкой
-
-Верни строго JSON-массив из 5 элементов:
-[{{"title": "...", "reason": "почему важно", "original_index": N}}]
-
-Темы:
-{items_text}"""
+    prompt = f"{_TOPICS_PROMPT}\n\nСписок новостей:\n{items_text}"
     try:
         resp = await llm.chat.completions.create(
             model=config.LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
+            temperature=0.4,
         )
     except Exception as exc:
-        logger.error("LLM-фильтрация тем не удалась: %s", exc)
-        return items[:5]
+        logger.error("LLM-извлечение тем не удалось: %s", exc)
+        return _fallback_topics(raw_items)
     try:
         raw = resp.choices[0].message.content
         start = raw.find("[")
         end = raw.rfind("]") + 1
+        if start < 0 or end <= start:
+            raise ValueError("LLM не вернул JSON-массив")
         parsed = json.loads(raw[start:end])
-        result = []
-        for p in parsed:
-            idx = p.get("original_index", 0) - 1
-            if 0 <= idx < len(items):
-                it = dict(items[idx])
-                it["reason"] = p.get("reason", "")
-                result.append(it)
-        logger.info("LLM отобрал тем: %d", len(result))
-        return result[:5]
+        known = {_norm_url(it.get("url", "")): it for it in raw_items}
+        result: list[dict] = []
+        for p in parsed[:10]:
+            topic = (p.get("topic") or "").strip()
+            if not topic:
+                continue
+            sources: list[str] = []
+            seen: set[str] = set()
+            for s in (p.get("sources") or []):
+                s_norm = _norm_url(s)
+                if s_norm and s_norm in known and s_norm not in seen:
+                    seen.add(s_norm)
+                    sources.append(known[s_norm]["url"])
+            if not sources:
+                # тема без реальных ссылок на статьи бесполезна — пропускаем
+                continue
+            result.append({
+                "topic": topic,
+                "description": (p.get("description") or "").strip(),
+                "sources": sources,
+                "source_count": len(sources),
+            })
+        if not result:
+            raise ValueError("ни одной темы с валидными источниками")
+        logger.info("LLM выделил общих тем: %d", len(result))
+        return result
     except Exception as exc:
-        logger.warning("LLM вернул некорректный JSON, fallback на первые 5: %s", exc)
-        return items[:5]
+        logger.warning("LLM вернул некорректный JSON, fallback по источникам: %s", exc)
+        return _fallback_topics(raw_items)
 
 # ========================================================================
 # 5. LLM: ГЕНЕРАЦИЯ ПЛАНОВ СТАТЕЙ
@@ -480,7 +526,7 @@ async def generate_plans(topic: dict, platform_style: str) -> list[dict]:
         logger.warning("LLM не настроен — возвращаю шаблонные планы")
         return _fallback_plans(topic["title"])
     prompt = f"""Тема: {topic['title']}
-Источник: {topic['url']}
+Источники: {", ".join(topic.get("sources") or [])}
 Стиль для платформы: {platform_style}
 
 Сгенерируй 3 варианта плана статьи (каждый — список из 4-6 пунктов):
@@ -516,23 +562,33 @@ async def generate_plans(topic: dict, platform_style: str) -> list[dict]:
 # 6. LLM: ГЕНЕРАЦИЯ СТАТЬИ + ФАКТЧЕКИНГ
 # ========================================================================
 
-async def generate_article(topic: dict, plan: dict, platform_style: str) -> str:
+async def generate_article(topic_id: int, plan: dict, platform_style: str) -> str:
+    """Генерирует статью; тема, её description и sources загружаются из БД по topic_id."""
     if llm is None:
         logger.warning("LLM не настроен — статья не может быть сгенерирована")
         return ""
+    topic = await get_topic(topic_id)
+    if not topic:
+        logger.error("Тема %s не найдена в БД — генерация статьи невозможна", topic_id)
+        return ""
+    topic_title = topic.get("title") or ""
+    topic_description = (topic.get("description") or "").strip()
+    sources = topic.get("sources") or []
+    sources_list = "\n".join(f"{i + 1}. {u}" for i, u in enumerate(sources))
     points = "\n".join(f"  {i+1}. {p}" for i, p in enumerate(plan["points"]))
-    prompt = f"""Напиши статью для IT-блога.
-
-Тема: {topic['title']}
-Источник: {topic['url']}
+    prompt = f"""Тема: {topic_title}
+Описание темы: {topic_description}
+Источники для статьи (используй ссылки на эти ресурсы в тексте):
+{sources_list}
 Стиль: {platform_style}
 План:
 {points}
 
 Требования:
 - Объём: 1500-3000 слов
-- Вставь ссылки на источники в формате [1], [2] и т.д.
-- В конце добавь призыв к сообществу: мы строим корпоративный мессенджер, ищем разработчиков и энтузиастов.
+- ОБЯЗАТЕЛЬНО ссылайся на источники в формате [1], [2] и т.д., в конце статьи — список источников с URL
+- Каждое утверждение должно опираться на источник
+- В конце добавь призыв к сообществу: мы строим корпоративный мессенджер, ищем разработчиков и энтузиастов
 - Текст в HTML-разметке (h2, p, a, ul, li, strong)"""
     try:
         resp = await llm.chat.completions.create(
@@ -551,13 +607,22 @@ async def generate_article(topic: dict, plan: dict, platform_style: str) -> str:
         return ""
 
 
-async def fact_check(article: str) -> str:
+async def fact_check(article: str, sources: Optional[list[str]] = None) -> str:
+    """Фактчекинг статьи: проверяет в т.ч., что ссылки в статье реальные (из списка источников)."""
     if llm is None:
         return "⚠️ Фактчекинг недоступен: LLM не настроен (DEEPSEEK_API_KEY)."
+    sources = sources or []
+    sources_block = ""
+    if sources:
+        sources_block = (
+            "\n\nСписок РЕАЛЬНЫХ источников (ссылки в статье должны быть только из этого списка):\n"
+            + "\n".join(f"{i + 1}. {u}" for i, u in enumerate(sources))
+        )
     prompt = f"""Проверь статью на ошибки. Для каждого утверждения:
 1. Подтверждается ли фактами?
 2. Есть ли логические противоречия?
 3. Нет ли галлюцинаций (выдуманных ссылок/фактов)?
+4. Каждая ссылка [N] в статье ведёт на РЕАЛЬНЫЙ источник из приложенного списка, а не на выдуманный URL.{sources_block}
 
 Статья:
 {article[:8000]}
@@ -636,10 +701,10 @@ async def daily_trends() -> None:
         if not items:
             logger.warning("Ежедневная задача: тренды не собраны")
             return
-        top = await llm_filter_topics(items)
-        if top:
-            await save_topics(top)
-        logger.info("Ежедневная задача завершена: сохранено тем: %d", len(top))
+        topics = await extract_topics(items)
+        if topics:
+            await save_topics(topics)
+        logger.info("Ежедневная задача завершена: сохранено тем: %d", len(topics))
     except Exception as exc:
         logger.exception("Ошибка в ежедневном сборе трендов: %s", exc)
 
@@ -695,8 +760,8 @@ app = FastAPI(title="Trend Scanner", lifespan=lifespan)
 # 9. WEB: СТРАНИЦЫ И API
 # ========================================================================
 
-class RankRequest(BaseModel):
-    items: Optional[list[dict]] = None  # если не передано — берём последний сбор
+class SelectTopicsRequest(BaseModel):
+    topics: list[dict]  # выбранные пользователем темы {topic, description, sources}
 
 
 class PlansRequest(BaseModel):
@@ -709,11 +774,11 @@ class ArticleRequest(BaseModel):
     platform: str = "habr"
 
 
-class ApplicationIn(BaseModel):
-    name: str
-    role: str
-    skills: str
-    contact: str
+class ArticleRequestV2(BaseModel):
+    topic_id: int
+    platform: str = "habr"
+    plan_title: str
+    plan_points: list[str]
 
 
 @app.get("/")
@@ -746,44 +811,40 @@ async def api_platforms() -> dict:
 
 @app.post("/api/trends/collect")
 async def api_collect() -> dict:
-    global pending_items
+    global pending_items, pending_topics
     logger.info("Запрос на сбор трендов из веб-панели")
     items = await collect_trends()
-    pending_items = items
-    state["last_collect"] = datetime.now().isoformat()
-    state["last_collect_count"] = len(items)
-    return {"count": len(items), "items": items}
-
-
-@app.post("/api/topics/rank")
-async def api_rank(payload: RankRequest) -> dict:
-    global pending_items
-    items = payload.items if payload.items is not None else pending_items
     if not items:
-        raise HTTPException(
-            400,
-            "Нет трендов для ранжирования. Сначала выполни «Собрать тренды».",
-        )
-    if llm is None:
-        raise HTTPException(400, "LLM не настроен: задай DEEPSEEK_API_KEY в .env.")
-    top = await llm_filter_topics(items)
-    if not top:
-        raise HTTPException(502, "LLM не вернул темы. Проверь ключ и сеть.")
-    ids = await save_topics(top)
-    pending_items = items
-    state["last_rank"] = datetime.now().isoformat()
-    topics = []
-    for tid, t in zip(ids, top):
-        topics.append({
-            "id": tid,
-            "title": t["title"],
-            "source": t["source"],
-            "score": t.get("score", 0),
-            "reason": t.get("reason", ""),
-            "url": t.get("url", ""),
-            "date": datetime.now().isoformat(),
+        raise HTTPException(502, "Не удалось собрать тренды. Проверь логи и прокси.")
+    pending_items = items  # сырые тренды сохраняем для возможного повторного использования
+    topics = await extract_topics(items)
+    pending_topics = topics
+    state["last_collect"] = datetime.now().isoformat()
+    state["last_collect_count"] = len(topics)
+    return {"count": len(topics), "topics": topics}
+
+
+@app.post("/api/topics/select")
+async def api_select(payload: SelectTopicsRequest) -> dict:
+    """Сохраняет выбранные пользователем темы в БД (секция «Темы дня»)."""
+    if not payload.topics:
+        raise HTTPException(400, "Ни одна тема не выбрана.")
+    clean = []
+    for t in payload.topics:
+        sources = [s for s in (t.get("sources") or []) if isinstance(s, str)]
+        topic = (t.get("topic") or t.get("title") or "").strip()
+        if not topic:
+            continue
+        clean.append({
+            "topic": topic,
+            "description": (t.get("description") or "").strip(),
+            "sources": sources,
+            "source_count": len(sources),
         })
-    return {"topics": topics}
+    if not clean:
+        raise HTTPException(400, "Выбранные темы пустые.")
+    ids = await save_topics(clean)
+    return {"saved": len(ids), "ids": ids}
 
 
 @app.get("/api/topics")
@@ -827,10 +888,10 @@ async def api_generate(payload: ArticleRequest) -> dict:
     plan = plans[payload.plan_index]
     logger.info("Генерация статьи для темы %s (план %s, платформа %s)",
                 payload.topic_id, plan.get("variant"), payload.platform)
-    article = await generate_article(topic, plan, pf["style"])
+    article = await generate_article(payload.topic_id, plan, pf["style"])
     if not article:
         raise HTTPException(502, "Не удалось сгенерировать статью. Проверь LLM-ключ и сеть.")
-    report = await fact_check(article)
+    report = await fact_check(article, topic.get("sources") or [])
     article_id = await save_article(payload.topic_id, payload.platform, article)
     factcheck_store[article_id] = report
     return {
@@ -840,6 +901,44 @@ async def api_generate(payload: ArticleRequest) -> dict:
         "platform_name": pf["name"],
         "plan_variant": plan.get("variant"),
         "plan_title": plan.get("title"),
+        "article": article,
+        "factcheck": report,
+    }
+
+
+@app.post("/api/articles/generate-v2")
+async def api_generate_v2(payload: ArticleRequestV2) -> dict:
+    """Генерация статьи по отредактированному плану (переданному из веб-панели)."""
+    topic = await get_topic(payload.topic_id)
+    if not topic:
+        raise HTTPException(404, "Тема не найдена")
+    pf = config.PLATFORM_MAP.get(payload.platform)
+    if not pf:
+        raise HTTPException(400, f"Неизвестная платформа: {payload.platform}")
+    points = [p.strip() for p in (payload.plan_points or []) if p and p.strip()]
+    if not points:
+        raise HTTPException(400, "План статьи пуст: добавь хотя бы один пункт.")
+    plan = {
+        "variant": "custom",
+        "title": (payload.plan_title or "").strip() or topic["title"],
+        "points": points,
+    }
+    logger.info("Генерация статьи v2 для темы %s (отредактированный план, платформа %s)",
+                payload.topic_id, payload.platform)
+    article = await generate_article(payload.topic_id, plan, pf["style"])
+    if not article:
+        raise HTTPException(502, "Не удалось сгенерировать статью. Проверь LLM-ключ и сеть.")
+    report = await fact_check(article, topic.get("sources") or [])
+    article_id = await save_article(payload.topic_id, payload.platform, article)
+    factcheck_store[article_id] = report
+    return {
+        "id": article_id,
+        "topic_title": topic["title"],
+        "platform": payload.platform,
+        "platform_name": pf["name"],
+        "plan_variant": plan["variant"],
+        "plan_title": plan["title"],
+        "plan_points": points,
         "article": article,
         "factcheck": report,
     }
@@ -871,24 +970,6 @@ async def api_publish(article_id: int) -> dict:
     published_urls[article_id] = url
     await update_article_status(article_id, "published")
     return {"url": url}
-
-
-@app.post("/api/applications")
-async def api_add_application(payload: ApplicationIn) -> dict:
-    data = payload.model_dump()
-    await save_application(data)
-    return {"ok": True}
-
-
-@app.get("/api/applications")
-async def api_applications() -> dict:
-    return {"applications": await list_applications(100)}
-
-
-@app.delete("/api/applications/{app_id}")
-async def api_delete_application(app_id: int) -> dict:
-    await delete_application(app_id)
-    return {"ok": True}
 
 
 # ========================================================================
