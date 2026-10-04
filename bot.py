@@ -41,11 +41,8 @@ if not BOT_TOKEN:
         "BOT_TOKEN не задан. Укажи переменную окружения BOT_TOKEN "
         "(в .env или docker-compose.yml) и перезапусти бота."
     )
-    # Критическая ошибка — падаем сразу, polling не запускаем
     sys.exit(1)
 
-# Прокси ОПЦИОНАЛЕН: если PROXY_URL не задан — работаем напрямую.
-# Раньше дефолт «http://127.0.0.1:8080» ломал бота на машинах без прокси.
 PROXY_URL = os.getenv("PROXY_URL")
 DB_PATH = os.getenv("DB_PATH", "/app/db/bot.db")
 
@@ -69,7 +66,6 @@ def _build_session() -> Optional[AiohttpSession]:
 bot = Bot(token=BOT_TOKEN, session=_build_session())
 dp = Dispatcher()
 try:
-    # Расписание в МСК (tzdata уже есть в requirements)
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 except Exception:
     scheduler = AsyncIOScheduler()
@@ -78,13 +74,13 @@ llm = AsyncOpenAI(
     api_key=config.LLM_API_KEY,
     base_url=config.LLM_BASE_URL,
 )
-# Состояния (в памяти, для старта хватит)
-pending_topics = {}   # admin_msg_id → list of topics
-pending_plans = {}    # admin_msg_id → {topic, plans}
-pending_articles = {} # admin_msg_id → {article, factcheck, platform}
+
+pending_topics = {}
+pending_plans = {}
+pending_articles = {}
 
 # ========================================================================
-# 2. БАЗА ДАННЫХ (aiosqlite — асинхронно, не блокирует event loop)
+# 2. БАЗА ДАННЫХ
 # ========================================================================
 
 _DB_SCHEMA = """
@@ -116,7 +112,6 @@ _DB_SCHEMA = """
 
 
 async def db_init() -> None:
-    """Создаёт директорию и таблицы БД (асинхронно, вызывается при старте)."""
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
@@ -130,7 +125,6 @@ async def db_init() -> None:
 
 
 async def save_topics(topics: list[dict]) -> None:
-    """Сохраняет отобранные темы в таблицу topics."""
     if not topics:
         return
     try:
@@ -147,7 +141,6 @@ async def save_topics(topics: list[dict]) -> None:
 
 
 async def save_application(app: dict) -> None:
-    """Сохраняет заявку читателя на коллаборацию."""
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
@@ -166,13 +159,11 @@ async def save_application(app: dict) -> None:
     except Exception as exc:
         logger.error("Ошибка сохранения заявки в БД: %s", exc)
 
-
 # ========================================================================
 # 3. СБОР ТРЕНДОВ
 # ========================================================================
 
 async def fetch_hackernews_top(limit: int = 30) -> list[dict]:
-    """Top stories с Hacker News через Firebase API (без ключа)."""
     items = []
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -206,7 +197,6 @@ async def fetch_hackernews_top(limit: int = 30) -> list[dict]:
 
 
 async def fetch_github_trending(limit: int = 15) -> list[dict]:
-    """Свежие репозитории через GitHub Search API (без ключа, 10 req/min)."""
     date_since = datetime.now().strftime("%Y-%m-%d")
     queries = ["messaging", "chat", "collaboration", "real-time", "communication"]
     items = []
@@ -244,10 +234,8 @@ async def fetch_github_trending(limit: int = 15) -> list[dict]:
 
 
 async def fetch_google_news_rss(query: str = "IT trends messaging") -> list[dict]:
-    """Google News RSS — без ключа, без лимитов."""
     try:
         url = f"https://news.google.com/rss/search?q={query}&hl=ru&gl=RU"
-        # feedparser.parse — блокирующая операция, выполняем в отдельном потоке
         feed = await asyncio.to_thread(feedparser.parse, url)
         items = []
         for entry in feed.entries[:10]:
@@ -265,7 +253,6 @@ async def fetch_google_news_rss(query: str = "IT trends messaging") -> list[dict
 
 
 async def collect_trends() -> list[dict]:
-    """Собирает тренды из всех источников и дедуплицирует."""
     tasks = [
         fetch_hackernews_top(30),
         fetch_github_trending(15),
@@ -278,7 +265,6 @@ async def collect_trends() -> list[dict]:
             all_items.extend(res)
         else:
             logger.warning("Источник №%d вернул ошибку: %s", idx + 1, res)
-    # Дедупликация по URL
     seen = set()
     unique = []
     for item in all_items:
@@ -294,7 +280,6 @@ async def collect_trends() -> list[dict]:
 # ========================================================================
 
 async def llm_filter_topics(items: list[dict]) -> list[dict]:
-    """LLM фильтрует и ранжирует темы под ЦА (корпоративный мессенджер)."""
     if not items:
         return []
     items_text = "\n".join(
@@ -322,11 +307,9 @@ async def llm_filter_topics(items: list[dict]) -> list[dict]:
         )
     except Exception as exc:
         logger.error("LLM-фильтрация тем не удалась: %s", exc)
-        # Fallback: первые 5 без LLM
         return items[:5]
     try:
         raw = resp.choices[0].message.content
-        # Извлекаем JSON из ответа
         start = raw.find("[")
         end = raw.rfind("]") + 1
         parsed = json.loads(raw[start:end])
@@ -341,7 +324,6 @@ async def llm_filter_topics(items: list[dict]) -> list[dict]:
         return result[:5]
     except Exception as exc:
         logger.warning("LLM вернул некорректный JSON, fallback на первые 5: %s", exc)
-        # Fallback: первые 5 без LLM
         return items[:5]
 
 # ========================================================================
@@ -349,7 +331,6 @@ async def llm_filter_topics(items: list[dict]) -> list[dict]:
 # ========================================================================
 
 async def generate_plans(topic: dict, platform_style: str) -> list[dict]:
-    """Генерирует 3 варианта плана статьи в разных стилях подачи."""
     prompt = f"""Тема: {topic['title']}
 Источник: {topic['url']}
 Стиль для платформы: {platform_style}
@@ -396,7 +377,6 @@ async def generate_plans(topic: dict, platform_style: str) -> list[dict]:
 # ========================================================================
 
 async def generate_article(topic: dict, plan: dict, platform_style: str) -> str:
-    """Генерирует полную статью по выбранному плану."""
     points = "\n".join(f"  {i+1}. {p}" for i, p in enumerate(plan["points"]))
     prompt = f"""Напиши статью для IT-блога.
 
@@ -429,7 +409,6 @@ async def generate_article(topic: dict, plan: dict, platform_style: str) -> str:
 
 
 async def fact_check(article: str) -> str:
-    """Независимая проверка статьи на ошибки (второй проход LLM)."""
     prompt = f"""Проверь статью на ошибки. Для каждого утверждения:
 1. Подтверждается ли фактами?
 2. Есть ли логические противоречия?
@@ -461,16 +440,13 @@ _TAG_RE = re.compile(r"<[^>]+>")
 
 
 def _strip_html(text: str) -> str:
-    """Превращает HTML в обычный текст (для короткого анонса в канале)."""
     if not text:
         return ""
     return html.unescape(_TAG_RE.sub(" ", text)).strip()
 
 
 async def publish_to_telegram(article_html: str) -> Optional[str]:
-    """Публикует в Telegram-канал (короткий анонс + ссылка на Telegraph)."""
     try:
-        # Для канала берём первые 500 символов как анонс (без HTML-тегов)
         plain = html.escape(_strip_html(article_html)[:500]) + "..."
         await bot.send_message(
             chat_id=config.CHANNEL_ID,
@@ -486,7 +462,6 @@ async def publish_to_telegram(article_html: str) -> Optional[str]:
 
 
 async def publish_to_telegraph(title: str, content_html: str) -> Optional[str]:
-    """Публикует полную статью на Telegraph."""
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post(
@@ -520,8 +495,6 @@ async def publish_to_telegraph(title: str, content_html: str) -> Optional[str]:
 # ========================================================================
 
 class LoggingMiddleware(BaseMiddleware):
-    """Логирует входящие события и не даёт ошибкам хендлеров уронить polling."""
-
     async def __call__(
         self,
         handler: Callable[
@@ -562,7 +535,6 @@ dp.callback_query.middleware(LoggingMiddleware())
 
 @dp.errors()
 async def errors_handler(event: ErrorEvent) -> None:
-    """Глобальный обработчик ошибок апдейтов — бот продолжает работать."""
     logger.error("Ошибка обработки апдейта: %s", event.exception)
 
 
@@ -575,7 +547,6 @@ async def cmd_start(msg: Message):
             "/help — справка"
         )
     else:
-        # Читатель канала — заявка на коллаборацию
         await msg.answer(
             "👋 Мы строим корпоративный мессенджер!\n\n"
             "Чем интересуешься?",
@@ -603,9 +574,7 @@ async def cmd_trends(msg: Message):
         if not top:
             await msg.answer("❌ LLM не отдал темы. Проверь API-ключ DeepSeek.")
             return
-        # Сохраняем в БД (асинхронно)
         await save_topics(top)
-        # Клавиатура
         kb = InlineKeyboardBuilder()
         for i, t in enumerate(top):
             kb.button(text=f"✅ Тема {i+1}", callback_data=f"topic_{i}")
@@ -730,7 +699,6 @@ async def cb_publish(cb: CallbackQuery):
             else:
                 await cb.message.answer("❌ Не удалось опубликовать. Подробности в логах.")
         else:
-            # Для ручных платформ — отправляем готовый текст
             await cb.message.answer(
                 f"📄 Текст для {platform} готов. Скопируй и опубликуй вручную:\n\n{article[:3500]}"
             )
@@ -750,7 +718,7 @@ async def cb_rework(cb: CallbackQuery):
 # 9. ОБРАБОТКА ЗАЯВОК ОТ ЧИТАТЕЛЕЙ
 # ========================================================================
 
-collab_state = {}  # user_id → step
+collab_state = {}
 
 @dp.callback_query(F.data.startswith("collab_"))
 async def cb_collab(cb: CallbackQuery):
@@ -769,8 +737,6 @@ async def cb_collab(cb: CallbackQuery):
 @dp.message(F.text)
 async def handle_collab(msg: Message):
     if msg.from_user.id == config.ADMIN_ID:
-        # Если админ пишет после "на доработку" — перегенерируем
-        # (упрощённая версия)
         return
     state = collab_state.get(msg.from_user.id)
     if not state:
@@ -785,9 +751,7 @@ async def handle_collab(msg: Message):
         await msg.answer("Ваш контакт (Telegram или почта)?")
     elif state["step"] == "contact":
         state["contact"] = msg.text
-        # Сохраняем (асинхронно, без блокировки event loop)
         await save_application(state)
-        # Отправляем админу
         try:
             await bot.send_message(
                 config.ADMIN_ID,
@@ -801,15 +765,13 @@ async def handle_collab(msg: Message):
         logger.info("Заявка читателя %s обработана полностью.", msg.from_user.id)
 
 # ========================================================================
-# 10. ПЛАНИРОВЩИК (ежедневный сбор трендов)
+# 10. ПЛАНИРОВЩИК
 # ========================================================================
 
 async def daily_trends():
-    """Автоматический запуск в заданное время."""
     logger.info("Ежедневная задача: сбор трендов начат")
     try:
         await bot.send_message(config.ADMIN_ID, "⏳ Ежедневный сбор трендов запущен...")
-        # Аналогично /trends, но без команды
         items = await collect_trends()
         if not items:
             await bot.send_message(config.ADMIN_ID, "❌ Тренды не собраны сегодня.")
@@ -835,19 +797,17 @@ async def daily_trends():
         logger.exception("Ошибка в ежедневном сборе трендов: %s", exc)
 
 # ========================================================================
-# 11. ДОПОЛНИТЕЛЬНО: ПРОВЕРКА ПРОКСИ
+# 11. ПРОВЕРКА ПРОКСИ
 # ========================================================================
 
 async def check_proxy_available(proxy_url: str, timeout: float = 5.0) -> bool:
-    """Проверяет доступность прокси (таймаут 5 сек). Не бросает исключений."""
+    """Проверяет доступность прокси через trust_env (без aiohttp-socks)."""
     try:
-        async with aiohttp.ClientSession() as client:
+        async with aiohttp.ClientSession(trust_env=True) as client:
             async with client.get(
                 "https://api.telegram.org",
-                proxy=proxy_url,
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as resp:
-                # Любой HTTP-ответ (даже 404 от api.telegram.org) = прокси жив
                 logger.info("Прокси %s доступен (HTTP %s).", proxy_url, resp.status)
                 return True
     except Exception as exc:
@@ -863,7 +823,6 @@ async def main():
 
     await db_init()
 
-    # Проверка доступности прокси при старте (не критична для запуска)
     if PROXY_URL:
         if await check_proxy_available(PROXY_URL):
             logger.info("Прокси %s доступен — продолжаю с прокси.", PROXY_URL)
@@ -879,7 +838,6 @@ async def main():
                 pass
             bot = Bot(token=BOT_TOKEN)
 
-    # Планировщик
     try:
         hour, minute = config.TRENDS_TIME.split(":")
         scheduler.add_job(
@@ -895,7 +853,6 @@ async def main():
     except Exception as exc:
         logger.error("Не удалось настроить планировщик: %s", exc)
 
-    # Контрольная проверка токена через Telegram API
     try:
         me = await bot.get_me()
         logger.info("Подключение к Telegram API успешно: @%s", me.username)
@@ -904,7 +861,6 @@ async def main():
 
     logger.info("🚀 Бот запущен. Стартую polling...")
     try:
-        # Polling стартует всегда, в самом конце main(), без блокирующих условий
         await dp.start_polling(bot)
     finally:
         try:
@@ -919,20 +875,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен пользователем.")
- pending_topics[sent.message_id] = top
-
-# ========================================================================
-# 11. ЗАПУСК
-# ========================================================================
-
-async def main():
-    db_init()
-    # Планировщик
-    hour, minute = config.TRENDS_TIME.split(":")
-    scheduler.add_job(daily_trends, "cron", hour=int(hour), minute=int(minute))
-    scheduler.start()
-    print(f"Бот запущен. Тренды будут приходить в {config.TRENDS_TIME}")
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
