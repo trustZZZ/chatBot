@@ -1,13 +1,8 @@
-version: "3.8"
-
 services:
   trend-bot:
     build: .
     container_name: trend-bot
-    restart: unless-stopped
     network_mode: "host"
-    volumes:
-      - ./db:/app/db
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
       - CHANNEL_ID=${CHANNEL_ID}
@@ -15,7 +10,7 @@ services:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       - LLM_BASE_URL=${LLM_BASE_URL}
       - TZ=Europe/Moscow
-      # Прокси опционален — раскомментируй если нужен:
       - PROXY_URL=http://127.0.0.1:8080
-      - HTTP_PROXY=http://127.0.0.1:8080
-      - HTTPS_PROXY=http://127.0.0.1:8080
+    volumes:
+      - ./db:/app/db
+    restart: unless-stopped
