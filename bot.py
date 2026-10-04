@@ -794,11 +794,11 @@ async def daily_trends():
 # ========================================================================
 
 async def check_proxy_available(proxy_url: str, timeout: float = 5.0) -> bool:
-    """Проверяет доступность прокси через trust_env (без aiohttp-socks)."""
     try:
-        async with aiohttp.ClientSession(trust_env=True) as client:
+        async with aiohttp.ClientSession() as client:
             async with client.get(
                 "https://api.telegram.org",
+                proxy=proxy_url,
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as resp:
                 logger.info("Прокси %s доступен (HTTP %s).", proxy_url, resp.status)
