@@ -16,4 +16,6 @@ services:
       - LLM_BASE_URL=${LLM_BASE_URL}
       - TZ=Europe/Moscow
       # Прокси опционален — раскомментируй если нужен:
-      # - PROXY_URL=http://127.0.0.1:8080
+      - PROXY_URL=http://127.0.0.1:8080
+      - HTTP_PROXY=http://127.0.0.1:8080
+      - HTTPS_PROXY=http://127.0.0.1:8080

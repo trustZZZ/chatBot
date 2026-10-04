@@ -1,0 +1,12 @@
+[0;1;32m●[0m sing-box.service - sing-box proxy
+   Loaded: loaded (/etc/systemd/system/sing-box.service; enabled; vendor preset: disabled)
+   Active: [0;1;32mactive (running)[0m since Sun 2026-10-04 15:27:18 EDT; 18s ago
+ Main PID: 26440 (sing-box)
+    Tasks: 6 (limit: 5945)
+   Memory: 5.2M
+   CGroup: /system.slice/sing-box.service
+           └─26440 /usr/local/bin/sing-box run -c /etc/sing-box/config.json
+
+Oct 04 15:27:18 vm4717664.firstbyte.club systemd[1]: sing-box.service: Succeeded.
+Oct 04 15:27:18 vm4717664.firstbyte.club systemd[1]: Stopped sing-box proxy.
+Oct 04 15:27:18 vm4717664.firstbyte.club systemd[1]: Started sing-box proxy.
