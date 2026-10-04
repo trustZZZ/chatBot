@@ -25,11 +25,17 @@ import config
 # 0. ЛОГИРОВАНИЕ
 # ========================================================================
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+# Детальные DEBUG-логи только для нашего модуля; библиотеки — INFO и выше,
+# чтобы не тонуть в DEBUG от aiosqlite/asyncio/apscheduler.
+logging.getLogger("trend_bot").setLevel(logging.DEBUG)
 logging.getLogger("aiogram.event").setLevel(logging.WARNING)
+logging.getLogger("aiosqlite").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.INFO)
+logging.getLogger("asyncio").setLevel(logging.INFO)
 logger = logging.getLogger("trend_bot")
 
 # ========================================================================
@@ -42,6 +48,26 @@ if not BOT_TOKEN:
 
 PROXY_URL = os.getenv("PROXY_URL")
 DB_PATH = os.getenv("DB_PATH", "/app/db/bot.db")
+
+
+def _cleanup_proxy_env() -> None:
+    """Убираем HTTP_PROXY/HTTPS_PROXY/ALL_PROXY из окружения процесса.
+
+    aiohttp (движок aiogram-сессии) по умолчанию включает trust_env=True и
+    сам подхватывает эти переменные, из-за чего прокси молча применяется ко
+    ВСЕМ запросам (Telegram, GitHub, Google News, DeepSeek). При
+    network_mode: "host" адрес host.docker.internal на Linux не резолвится —
+    все запросы падают. Прокси управляется ТОЛЬКО через PROXY_URL внутри
+    aiogram-сессии, остальные переменные удаляем.
+    """
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                "http_proxy", "https_proxy", "all_proxy"):
+        value = os.environ.pop(var, None)
+        if value:
+            logger.warning(
+                "Переменная %s=%s удалена из окружения: прокси задаётся только через PROXY_URL.",
+                var, value,
+            )
 
 
 class ProxySession(AiohttpSession):
@@ -65,17 +91,19 @@ class ProxySession(AiohttpSession):
         logger.info("Прокси-сессия создана: %s (таймаут %ss)", proxy_url, timeout)
 
 
-def _build_session() -> Optional[AiohttpSession]:
-    if not PROXY_URL:
-        logger.warning(
-            "PROXY_URL не задан — бот будет подключаться к Telegram напрямую. "
-            "На сервере в РФ это не работает: запросы будут висеть до таймаута."
-        )
-        return None
-    return ProxySession(PROXY_URL)
+def _build_session(proxy_url: Optional[str]) -> AiohttpSession:
+    if proxy_url:
+        return ProxySession(proxy_url)
+    logger.warning("PROXY_URL не задан — прямое подключение к Telegram API.")
+    return AiohttpSession(timeout=60.0)
 
 
-bot = Bot(token=BOT_TOKEN, session=_build_session())
+def _new_bot() -> Bot:
+    return Bot(token=BOT_TOKEN, session=_build_session(PROXY_URL))
+
+
+_cleanup_proxy_env()
+bot = _new_bot()
 dp = Dispatcher()
 try:
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
@@ -547,7 +575,7 @@ dp.callback_query.middleware(LoggingMiddleware())
 
 @dp.errors()
 async def errors_handler(event: ErrorEvent) -> None:
-    logger.error("Ошибка обработки апдейта: %s", event.exception)
+    logger.exception("Ошибка обработки апдейта: %s", event.exception)
 
 
 @dp.message(Command("start"))
@@ -810,9 +838,44 @@ async def daily_trends():
 # 11. ЗАПУСК
 # ========================================================================
 
+async def _install_asyncio_exception_handler() -> None:
+    """Логируем НЕОБРАБОТАННЫЕ исключения из фоновых asyncio-задач.
+
+    Именно они чаще всего роняют polling «молча»: без этого хендлера трейсбек
+    уходит в stderr нечитаемым куском либо теряется вовсе.
+    """
+    loop = asyncio.get_running_loop()
+
+    def _handler(_loop: asyncio.AbstractEventLoop, context: dict) -> None:
+        exc = context.get("exception")
+        logger.critical(
+            "НЕОБРАБОТАННОЕ исключение в asyncio-задаче: %s",
+            context.get("message", context),
+        )
+        if exc:
+            logger.critical("Полный трейсбек:", exc_info=exc)
+
+    loop.set_exception_handler(_handler)
+
+
+async def _ensure_bot_online(current_bot: Bot) -> bool:
+    """Проверяем доступность Telegram API через текущую сессию (≤10 сек).
+
+    getMe — самый лёгкий метод: если он проходит, прокси и токен в порядке.
+    """
+    try:
+        me = await asyncio.wait_for(current_bot.get_me(), timeout=10)
+        logger.info("Telegram API доступен: @%s (id=%s)", me.username, me.id)
+        return True
+    except Exception as exc:
+        logger.error("Telegram API недоступен через текущую сессию: %s", exc)
+        return False
+
+
 async def main():
     global bot
 
+    _install_asyncio_exception_handler()
     await db_init()
 
     try:
@@ -830,9 +893,30 @@ async def main():
     except Exception as exc:
         logger.error("Не удалось настроить планировщик: %s", exc)
 
+    # --- Проверка связи с Telegram до старта polling ---
+    online = await _ensure_bot_online(bot)
+    if not online and PROXY_URL:
+        # Прокси лежит — не роняем бота, переключаемся на прямое подключение.
+        logger.warning("Прокси %s недоступен — переключаюсь на прямое подключение...", PROXY_URL)
+        try:
+            await bot.session.close()
+        except Exception:
+            pass
+        bot = Bot(token=BOT_TOKEN, session=AiohttpSession(timeout=60.0))
+        online = await _ensure_bot_online(bot)
+    if not online:
+        logger.critical(
+            "Telegram API недоступен (прокси=%s). Проверь sing-box, токен и сеть. Завершение.",
+            PROXY_URL or "не задан",
+        )
+        sys.exit(1)
+
     logger.info("🚀 Бот запущен. Стартую polling...")
     try:
         await dp.start_polling(bot)
+    except Exception as exc:
+        logger.exception("Polling завершился с ошибкой: %s", exc)
+        raise  # docker restart: unless-stopped перезапустит контейнер
     finally:
         try:
             scheduler.shutdown(wait=False)
