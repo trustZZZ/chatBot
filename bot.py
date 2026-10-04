@@ -917,3 +917,20 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен пользователем.")
+ pending_topics[sent.message_id] = top
+
+# ========================================================================
+# 11. ЗАПУСК
+# ========================================================================
+
+async def main():
+    db_init()
+    # Планировщик
+    hour, minute = config.TRENDS_TIME.split(":")
+    scheduler.add_job(daily_trends, "cron", hour=int(hour), minute=int(minute))
+    scheduler.start()
+    print(f"Бот запущен. Тренды будут приходить в {config.TRENDS_TIME}")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
