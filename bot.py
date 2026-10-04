@@ -47,21 +47,11 @@ PROXY_URL = os.getenv("PROXY_URL")
 DB_PATH = os.getenv("DB_PATH", "/app/db/bot.db")
 
 
-class ProxySession(AiohttpSession):
-    """Сессия с прокси: proxy= для aiogram + trust_env для aiohttp."""
-    def __init__(self, proxy: str):
-        super().__init__(proxy=proxy)
-
-    async def get_session(self):
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(trust_env=True)
-        return self._session
-
 
 def _build_session() -> Optional[AiohttpSession]:
     if PROXY_URL:
         logger.info("Инициализация сессии с прокси: %s", PROXY_URL)
-        return ProxySession(proxy=PROXY_URL)
+        return AiohttpSession(proxy=PROXY_URL)
     logger.info("Прокси не задан — использую прямое подключение к Telegram API.")
     return None
 
@@ -806,9 +796,10 @@ async def daily_trends():
 
 async def check_proxy_available(proxy_url: str, timeout: float = 5.0) -> bool:
     try:
-        async with aiohttp.ClientSession(trust_env=True) as client:
+        async with aiohttp.ClientSession() as client:
             async with client.get(
                 "https://api.telegram.org",
+                proxy=proxy_url,
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as resp:
                 logger.info("Прокси %s доступен (HTTP %s).", proxy_url, resp.status)
@@ -816,6 +807,7 @@ async def check_proxy_available(proxy_url: str, timeout: float = 5.0) -> bool:
     except Exception as exc:
         logger.warning("Прокси %s недоступен: %s", proxy_url, exc)
         return False
+
 
 
 # ========================================================================
