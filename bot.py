@@ -26,14 +26,14 @@ import config
 # 0. ЛОГИРОВАНИЕ
 # ========================================================================
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("trend_bot")
 
 # ========================================================================
-# 1. ИНИЦИАЛИЗАЦИЯ (с валидацией токена)
+# 1. ИНИЦИАЛИЗАЦИЯ
 # ========================================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -57,8 +57,9 @@ class ProxySession(AiohttpSession):
 
 def _build_session() -> Optional[AiohttpSession]:
     if PROXY_URL:
-        logger.info("Инициализация сессии с прокси: %s", PROXY_URL)
+        logger.info("Инициализация сессии с прокси через trust_env: %s", PROXY_URL)
         return ProxySession()
+    logger.info("Прокси не задан — прямое подключение.")
     return None
 
 
@@ -263,7 +264,7 @@ async def collect_trends() -> list[dict]:
         if isinstance(res, list):
             all_items.extend(res)
         else:
-            logger.warning("Источник #%d вернул ошибку: %s", idx + 1, res)
+            logger.warning("Источник №%d вернул ошибку: %s", idx + 1, res)
     seen = set()
     unique = []
     for item in all_items:
@@ -796,41 +797,23 @@ async def daily_trends():
         logger.exception("Ошибка в ежедневном сборе трендов: %s", exc)
 
 # ========================================================================
-# 11. ПРОВЕРКА ПРОКСИ
-# ========================================================================
-
-async def check_proxy_available(proxy_url: str, timeout: float = 5.0) -> bool:
-    """Проверяет доступность прокси через trust_env (читает HTTP_PROXY/HTTPS_PROXY)."""
-    try:
-        async with aiohttp.ClientSession(trust_env=True) as client:
-            async with client.get(
-                "https://api.telegram.org",
-                timeout=aiohttp.ClientTimeout(total=timeout),
-            ) as resp:
-                logger.info("Прокси %s доступен (HTTP %s).", proxy_url, resp.status)
-                return True
-    except Exception as exc:
-        logger.warning("Прокси %s недоступен: %s", proxy_url, exc)
-        return False
-
-
-# ========================================================================
-# 12. ЗАПУСК
+# 11. ЗАПУСК
 # ========================================================================
 
 async def main():
     await db_init()
 
+    # Проверка прокси — логируем результат, но НЕ пересоздаём бота
     if PROXY_URL:
-        proxy_ok = await check_proxy_available(PROXY_URL)
-        if proxy_ok:
-            logger.info("Прокси %s доступен — продолжаю с прокси.", PROXY_URL)
-        else:
-            logger.warning(
-                "Прокси %s недоступен — продолжаю с прокси в любом случае "
-                "(Telegram заблокирован без прокси).",
-                PROXY_URL,
-            )
+        try:
+            async with aiohttp.ClientSession(trust_env=True) as client:
+                async with client.get(
+                    "https://api.telegram.org",
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    logger.info("Прокси доступен (HTTP %s).", resp.status)
+        except Exception as exc:
+            logger.warning("Прокси недоступен: %s. Бот продолжит с прокси.", exc)
 
     try:
         hour, minute = config.TRENDS_TIME.split(":")
@@ -846,9 +829,6 @@ async def main():
         logger.info("Планировщик запущен: ежедневный сбор трендов в %s", config.TRENDS_TIME)
     except Exception as exc:
         logger.error("Не удалось настроить планировщик: %s", exc)
-
-    # get_me() убран — может зависать при long-polling через прокси.
-    # Бот сам проверит токен при первом запросе.
 
     logger.info("🚀 Бот запущен. Стартую polling...")
     try:
