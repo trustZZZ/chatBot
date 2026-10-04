@@ -47,7 +47,6 @@ PROXY_URL = os.getenv("PROXY_URL")
 DB_PATH = os.getenv("DB_PATH", "/app/db/bot.db")
 
 
-
 class ProxySession(AiohttpSession):
     """Сессия с trust_env — читает HTTP_PROXY/HTTPS_PROXY из окружения."""
     async def get_session(self):
@@ -60,10 +59,7 @@ def _build_session() -> Optional[AiohttpSession]:
     if PROXY_URL:
         logger.info("Инициализация сессии с прокси: %s", PROXY_URL)
         return ProxySession()
-    logger.info("Прокси не задан — использую прямое подключение к Telegram API.")
     return None
-
-
 
 
 bot = Bot(token=BOT_TOKEN, session=_build_session())
@@ -267,7 +263,7 @@ async def collect_trends() -> list[dict]:
         if isinstance(res, list):
             all_items.extend(res)
         else:
-            logger.warning("Источник №%d вернул ошибку: %s", idx + 1, res)
+            logger.warning("Источник #%d вернул ошибку: %s", idx + 1, res)
     seen = set()
     unique = []
     for item in all_items:
@@ -804,6 +800,7 @@ async def daily_trends():
 # ========================================================================
 
 async def check_proxy_available(proxy_url: str, timeout: float = 5.0) -> bool:
+    """Проверяет доступность прокси через trust_env (читает HTTP_PROXY/HTTPS_PROXY)."""
     try:
         async with aiohttp.ClientSession(trust_env=True) as client:
             async with client.get(
@@ -817,31 +814,23 @@ async def check_proxy_available(proxy_url: str, timeout: float = 5.0) -> bool:
         return False
 
 
-
-
 # ========================================================================
 # 12. ЗАПУСК
 # ========================================================================
 
 async def main():
-    global bot
-
     await db_init()
 
     if PROXY_URL:
-        if await check_proxy_available(PROXY_URL):
+        proxy_ok = await check_proxy_available(PROXY_URL)
+        if proxy_ok:
             logger.info("Прокси %s доступен — продолжаю с прокси.", PROXY_URL)
         else:
             logger.warning(
-                "Прокси %s недоступен — переключаюсь на прямое подключение. "
-                "Бот продолжит работу.",
+                "Прокси %s недоступен — продолжаю с прокси в любом случае "
+                "(Telegram заблокирован без прокси).",
                 PROXY_URL,
             )
-            try:
-                await bot.session.close()
-            except Exception:
-                pass
-            bot = Bot(token=BOT_TOKEN)
 
     try:
         hour, minute = config.TRENDS_TIME.split(":")
@@ -858,15 +847,12 @@ async def main():
     except Exception as exc:
         logger.error("Не удалось настроить планировщик: %s", exc)
 
-    # try:
-    #     me = await bot.get_me()
-    #     logger.info("Подключение к Telegram API успешно: @%s", me.username)
-    # except Exception as exc:
-    #     logger.error("Telegram API недоступен или токен неверный: %s", exc)
+    # get_me() убран — может зависать при long-polling через прокси.
+    # Бот сам проверит токен при первом запросе.
 
     logger.info("🚀 Бот запущен. Стартую polling...")
     try:
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, timeout=10)
     finally:
         try:
             scheduler.shutdown(wait=False)
@@ -880,4 +866,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен пользователем.")
-
