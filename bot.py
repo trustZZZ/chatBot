@@ -26,10 +26,11 @@ import config
 # 0. ЛОГИРОВАНИЕ
 # ========================================================================
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+logging.getLogger("aiogram.event").setLevel(logging.WARNING)
 logger = logging.getLogger("trend_bot")
 
 # ========================================================================
@@ -37,10 +38,7 @@ logger = logging.getLogger("trend_bot")
 # ========================================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    logger.critical(
-        "BOT_TOKEN не задан. Укажи переменную окружения BOT_TOKEN "
-        "(в .env или docker-compose.yml) и перезапусти бота."
-    )
+    logger.critical("BOT_TOKEN не задан. Укажи переменную окружения BOT_TOKEN.")
     sys.exit(1)
 
 PROXY_URL = os.getenv("PROXY_URL")
@@ -58,13 +56,13 @@ class ProxySession(AiohttpSession):
 def _build_session() -> Optional[AiohttpSession]:
     if PROXY_URL:
         logger.info("Инициализация сессии с прокси через trust_env: %s", PROXY_URL)
-        return ProxySession(request_timeout=60)
+        return ProxySession()
+    logger.info("Прокси не задан — прямое подключение.")
     return None
 
 
 bot = Bot(token=BOT_TOKEN, session=_build_session(), request_timeout=60)
 dp = Dispatcher()
-
 try:
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 except Exception:
@@ -710,9 +708,7 @@ async def cb_publish(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "rework")
 async def cb_rework(cb: CallbackQuery):
-    await cb.message.answer(
-        "✏️ Напиши, что исправить (ответь на это сообщение):"
-    )
+    await cb.message.answer("✏️ Напиши, что исправить (ответь на это сообщение):")
 
 # ========================================================================
 # 9. ОБРАБОТКА ЗАЯВОК ОТ ЧИТАТЕЛЕЙ
@@ -801,6 +797,8 @@ async def daily_trends():
 # ========================================================================
 
 async def main():
+    global bot
+
     await db_init()
 
     try:
@@ -820,7 +818,7 @@ async def main():
 
     logger.info("🚀 Бот запущен. Стартую polling...")
     try:
-        await dp.start_polling(bot, timeout=10)
+        await dp.start_polling(bot)
     finally:
         try:
             scheduler.shutdown(wait=False)
