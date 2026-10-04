@@ -858,11 +858,11 @@ async def main():
     except Exception as exc:
         logger.error("Не удалось настроить планировщик: %s", exc)
 
-    try:
-        me = await bot.get_me()
-        logger.info("Подключение к Telegram API успешно: @%s", me.username)
-    except Exception as exc:
-        logger.error("Telegram API недоступен или токен неверный: %s", exc)
+    # try:
+    #     me = await bot.get_me()
+    #     logger.info("Подключение к Telegram API успешно: @%s", me.username)
+    # except Exception as exc:
+    #     logger.error("Telegram API недоступен или токен неверный: %s", exc)
 
     logger.info("🚀 Бот запущен. Стартую polling...")
     try:
@@ -880,3 +880,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен пользователем.")
+
