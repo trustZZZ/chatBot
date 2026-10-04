@@ -838,7 +838,7 @@ async def daily_trends():
 # 11. ЗАПУСК
 # ========================================================================
 
-async def _install_asyncio_exception_handler() -> None:
+def _install_asyncio_exception_handler() -> None:
     """Логируем НЕОБРАБОТАННЫЕ исключения из фоновых asyncio-задач.
 
     Именно они чаще всего роняют polling «молча»: без этого хендлера трейсбек
