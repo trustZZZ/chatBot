@@ -91,7 +91,7 @@ else:
 
 # Состояние веб-панели (в памяти; БД хранит историю)
 pending_items: list[dict] = []                 # последний сырой сбор трендов (для повторного использования)
-pending_topics: list[dict] = []                # последние темы, выделенные из сырого сбора
+pending_topics: dict = {"blocks": []}          # последние темы (структура с блоками) из сырого сбора
 plans_store: dict[int, list[dict]] = {}        # topic_id -> сгенерированные планы
 factcheck_store: dict[int, str] = {}           # article_id -> отчёт фактчекинга
 published_urls: dict[int, str] = {}            # article_id -> url Telegraph
@@ -118,6 +118,7 @@ _DB_SCHEMA = """
         sources TEXT,
         source_count INTEGER DEFAULT 0,
         source TEXT,
+        block TEXT,
         status TEXT DEFAULT 'new'
     );
     CREATE TABLE IF NOT EXISTS articles (
@@ -140,6 +141,7 @@ async def _ensure_topic_columns(db) -> None:
         ("description", "TEXT"),
         ("sources", "TEXT"),
         ("source_count", "INTEGER DEFAULT 0"),
+        ("block", "TEXT"),
     ):
         if name not in cols:
             await db.execute(f"ALTER TABLE topics ADD COLUMN {name} {decl}")
@@ -170,15 +172,18 @@ def _parse_topic_row(row: dict) -> dict:
     return row
 
 
-async def save_topics(topics: list[dict]) -> list[int]:
+async def save_topics(topics) -> list[int]:
     """Сохраняет темы в БД и возвращает их id.
 
     Принимает темы в формате extract_topics:
-    {topic, description, sources (list[str]), source_count}.
+    - структуру с блоками: {"blocks": [{"block_name": ..., "themes": [...]}]}, либо
+    - плоский список тем {topic, description, sources (list[str]), source_count, block}.
     """
     ids: list[int] = []
     if not topics:
         return ids
+    if isinstance(topics, dict):
+        topics = flatten_blocks(topics)
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             now = datetime.now().isoformat()
@@ -187,16 +192,18 @@ async def save_topics(topics: list[dict]) -> list[int]:
                 title = (t.get("topic") or t.get("title") or "").strip()
                 if not title:
                     continue
+                block = (t.get("block") or "").strip()
                 cur = await db.execute(
                     "INSERT INTO topics "
-                    "(date, title, description, sources, source_count, status) "
-                    "VALUES (?, ?, ?, ?, ?, 'new')",
+                    "(date, title, description, sources, source_count, block, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'new')",
                     (
                         now,
                         title,
                         (t.get("description") or "").strip(),
                         json.dumps(sources, ensure_ascii=False),
                         int(t.get("source_count") or len(sources)),
+                        block,
                     ),
                 )
                 ids.append(int(cur.lastrowid))
@@ -410,12 +417,32 @@ async def collect_trends() -> list[dict]:
 # ========================================================================
 
 _TOPICS_PROMPT = (
-    "Ты — редактор IT-блога. На основе списка свежих IT-новостей выдели общие темы, "
-    "которые можно развернуть в полноценную статью. Тема — это не заголовок новости, "
-    "а направление. Например: вместо 'GitHub выпустил новую фичу' → "
-    "'Как GitHub меняет workflow команд разработки'. "
-    'Верни JSON: [{"topic": "...", "description": "о чём статья", '
-    '"sources": ["ссылка1", "ссылка2"]}]'
+    "Ты — редактор русскоязычного IT-блога для аудитории: небольшие команды, стартапы, "
+    "разработчики, которым важны командная работа, скорость разработки, корпоративные "
+    "мессенджеры и контроль задач.\n\n"
+    "На основе списка свежих IT-новостей сформируй темы для статей. Темы НЕ должны "
+    "копировать заголовки новостей — они формируются на основе интересов аудитории и "
+    "текущих тенденций. Темы могут быть обучающими (кодинг, основы архитектуры, паттерны "
+    "программирования), информирующими (новости и тренды) или другими, которые ты сочтёшь "
+    "полезными для этой аудитории.\n\n"
+    "Темы делятся на блоки:\n"
+    '- "Обучающие" — 2-3 темы (туториалы, гайды, разбор паттернов, основы архитектуры)\n'
+    '- "Информирующие" — 2-3 темы (новости, тренды, обновления в IT-мире)\n'
+    '- 1-3 дополнительных блока — названия и темы формируешь ты (например, "Архитектура", '
+    '"Продуктовый менеджмент", "DevOps"). В каждом блоке 2-3 темы.\n\n'
+    "Всего блоков не больше 5. В каждом блоке 2-3 темы.\n\n"
+    "Темы и описания — на русском языке. Тема — это направление для статьи, а не заголовок "
+    "новости. Вечнозелёные темы использовать для раскрытия и дополнения основной темы.\n\n"
+    'Верни строго JSON:\n'
+    '{\n'
+    '  "blocks": [\n'
+    '    {"block_name": "Обучающие", "themes": [{"topic": "...", "description": "...", "sources": ["url1", "url2"]}]},\n'
+    '    {"block_name": "Информирующие", "themes": [{"topic": "...", "description": "...", "sources": ["url1"]}]},\n'
+    '    ...\n'
+    '  ]\n'
+    '}\n'
+    "sources — оригинальные URL статей, на которых основана тема (для фактчекинга). "
+    "Переводу не подлежат."
 )
 
 
@@ -423,38 +450,119 @@ def _norm_url(url: str) -> str:
     return (url or "").strip().rstrip("/")
 
 
-def _fallback_topics(raw_items: list[dict]) -> list[dict]:
-    """Fallback без LLM: группируем статьи по источнику."""
-    groups: dict[str, list[dict]] = {}
+_SOURCE_BLOCK_MAP = {
+    "GitHub": "Обучающие",
+    "HackerNews": "Информирующие",
+    "GoogleNews": "Информирующие",
+}
+
+
+def _fallback_topics(raw_items: list[dict]) -> dict:
+    """Fallback без LLM: темы группируются по источникам в блоки с русскими названиями.
+
+    Возвращает ту же структуру {blocks: [...]}, что и LLM-ветка, чтобы веб-панель
+    всегда работала единообразно. GitHub (репозитории) → «Обучающие», новостные
+    источники → «Информирующие». Блоки «Обучающие» и «Информирующие» присутствуют
+    всегда (хотя бы два блока), даже если в каком-то из них нет тем.
+    """
+    grouped: dict[str, list[dict]] = {name: [] for name in ("Обучающие", "Информирующие")}
+    seen: set[str] = set()
     for it in raw_items:
-        groups.setdefault(it.get("source", "News"), []).append(it)
-    result = []
-    for src, items in groups.items():
-        urls: list[str] = []
+        url = _norm_url(it.get("url", ""))
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        src = it.get("source", "News")
+        block_name = _SOURCE_BLOCK_MAP.get(src, "Информирующие")
+        title = (it.get("title") or "").strip()
+        short_title = title[:50]
+        grouped.setdefault(block_name, []).append({
+            "topic": f"Тема из источника {src}: {short_title}".strip(),
+            "description": f"Материал из источника {src}. Полный заголовок: {title}.",
+            "sources": [url],
+            "source_count": 1,
+        })
+    blocks = [
+        {"block_name": name, "themes": themes}
+        for name, themes in grouped.items()
+        if name in ("Обучающие", "Информирующие") or themes
+    ]
+    return {"blocks": blocks}
+
+
+def flatten_blocks(blocks_data: dict) -> list[dict]:
+    """Разворачивает структуру {blocks: [...]} в плоский список тем с полем block."""
+    flat: list[dict] = []
+    for b in (blocks_data or {}).get("blocks") or []:
+        if not isinstance(b, dict):
+            continue
+        block_name = (b.get("block_name") or "").strip()
+        for th in (b.get("themes") or []):
+            if not isinstance(th, dict):
+                continue
+            item = dict(th)
+            item.setdefault("block", block_name)
+            flat.append(item)
+    return flat
+
+
+def _extract_json(raw: str) -> str:
+    """Извлекает из ответа LLM самый внешний JSON-объект или массив."""
+    positions = {ch: i for i, ch in enumerate(raw) if ch in "[{"}
+    if not positions:
+        raise ValueError("JSON не найден в ответе LLM")
+    pos, opener = min(positions.items(), key=lambda kv: kv[1])
+    closer = "]" if opener == "[" else "}"
+    end = raw.rfind(closer)
+    if end <= pos:
+        raise ValueError("JSON не завершён в ответе LLM")
+    return raw[pos:end + 1]
+
+
+def _parse_themes(items: list, known: dict[str, dict]) -> list[dict]:
+    """Валидирует список тем из LLM: оставляет темы с реальными источниками.
+
+    known — словарь нормализованных URL собранных статей: url -> исходный item.
+    """
+    result: list[dict] = []
+    for p in items[:10]:
+        if not isinstance(p, dict):
+            continue
+        topic = (p.get("topic") or "").strip()
+        if not topic:
+            continue
+        sources: list[str] = []
         seen: set[str] = set()
-        for it in items:
-            u = it.get("url")
-            if u and u not in seen:
-                seen.add(u)
-                urls.append(u)
+        for s in (p.get("sources") or []):
+            s_norm = _norm_url(s)
+            if s_norm and s_norm in known and s_norm not in seen:
+                seen.add(s_norm)
+                sources.append(known[s_norm]["url"])
+        if not sources:
+            # тема без реальных ссылок на статьи бесполезна — пропускаем
+            continue
         result.append({
-            "topic": f"Новости и события: {src}",
-            "description": f"Сводка из {len(items)} свежих материалов источника {src}.",
-            "sources": urls,
-            "source_count": len(urls),
+            "topic": topic,
+            "description": (p.get("description") or "").strip(),
+            "sources": sources,
+            "source_count": len(sources),
         })
     return result
 
 
-async def extract_topics(raw_items: list[dict]) -> list[dict]:
-    """Группирует сырые статьи из collect_trends в общие темы через LLM.
+async def extract_topics(raw_items: list[dict]) -> dict:
+    """Группирует сырые статьи из collect_trends в блоки тем через LLM.
 
-    Возвращает список: {topic, description, sources (реальные url), source_count}.
+    Возвращает структуру:
+    {"blocks": [{"block_name": "...", "themes": [{topic, description, sources, source_count}, ...]}, ...]}
     sources — реальные ссылки на статьи, из которых выведена тема
     (они нужны позже для генерации статьи и фактчекинга).
+
+    Совместимость: если LLM вернул плоский массив тем, он оборачивается
+    в один блок «Темы».
     """
     if not raw_items:
-        return []
+        return {"blocks": []}
     if llm is None:
         logger.warning("LLM не настроен — темы формируются по источникам (fallback)")
         return _fallback_topics(raw_items)
@@ -474,39 +582,43 @@ async def extract_topics(raw_items: list[dict]) -> list[dict]:
         return _fallback_topics(raw_items)
     try:
         raw = resp.choices[0].message.content
-        start = raw.find("[")
-        end = raw.rfind("]") + 1
-        if start < 0 or end <= start:
-            raise ValueError("LLM не вернул JSON-массив")
-        parsed = json.loads(raw[start:end])
+        parsed = json.loads(_extract_json(raw))
         known = {_norm_url(it.get("url", "")): it for it in raw_items}
-        result: list[dict] = []
-        for p in parsed[:10]:
-            topic = (p.get("topic") or "").strip()
-            if not topic:
+
+        # Совместимость: плоский массив тем → один блок «Темы»
+        if isinstance(parsed, list):
+            themes = _parse_themes(parsed, known)
+            if not themes:
+                raise ValueError("плоский массив без валидных тем")
+            logger.info("LLM выделил тем (плоский массив → блок «Темы»): %d", len(themes))
+            return {"blocks": [{"block_name": "Темы", "themes": themes}]}
+
+        if not isinstance(parsed, dict):
+            raise ValueError("LLM вернул не JSON-объект")
+
+        blocks_raw = parsed.get("blocks")
+        if not isinstance(blocks_raw, list):
+            # Ещё одна форма совместимости: {"themes": [...]} без блоков
+            themes = _parse_themes(parsed.get("themes") or [], known)
+            if not themes:
+                raise ValueError("LLM не вернул блоки тем")
+            return {"blocks": [{"block_name": "Темы", "themes": themes}]}
+
+        blocks: list[dict] = []
+        for b in blocks_raw[:5]:  # всего блоков не больше 5
+            if not isinstance(b, dict):
                 continue
-            sources: list[str] = []
-            seen: set[str] = set()
-            for s in (p.get("sources") or []):
-                s_norm = _norm_url(s)
-                if s_norm and s_norm in known and s_norm not in seen:
-                    seen.add(s_norm)
-                    sources.append(known[s_norm]["url"])
-            if not sources:
-                # тема без реальных ссылок на статьи бесполезна — пропускаем
+            block_name = (b.get("block_name") or "").strip() or "Темы"
+            themes = _parse_themes(b.get("themes") or [], known)
+            if not themes:
                 continue
-            result.append({
-                "topic": topic,
-                "description": (p.get("description") or "").strip(),
-                "sources": sources,
-                "source_count": len(sources),
-            })
-        if not result:
-            raise ValueError("ни одной темы с валидными источниками")
-        logger.info("LLM выделил общих тем: %d", len(result))
-        return result
+            blocks.append({"block_name": block_name, "themes": themes[:3]})
+        if not blocks:
+            raise ValueError("ни одного блока с валидными темами")
+        logger.info("LLM выделил блоков тем: %d", len(blocks))
+        return {"blocks": blocks}
     except Exception as exc:
-        logger.warning("LLM вернул некорректный JSON, fallback по источникам: %s", exc)
+        logger.warning("LLM вернул некорректный ответ, fallback по источникам: %s", exc)
         return _fallback_topics(raw_items)
 
 # ========================================================================
@@ -533,6 +645,8 @@ async def generate_plans(topic: dict, platform_style: str) -> list[dict]:
 А) Аналитический разбор (сравнение, выводы)
 Б) Практический гайд (туториал, инструкция)
 В) Провокационное мнение (вызов, обсуждение)
+
+План и все пункты — строго на русском языке.
 
 Верни строго JSON:
 [{{"variant": "А", "title": "...", "points": ["п1","п2","п3"]}},
@@ -585,6 +699,7 @@ async def generate_article(topic_id: int, plan: dict, platform_style: str) -> st
 {points}
 
 Требования:
+- Статья пишется на русском языке. Все подзаголовки, абзацы и пояснения — на русском. Английскими остаются только технические термины (названия продуктов, языков программирования, библиотек) и URL.
 - Объём: 1500-3000 слов
 - ОБЯЗАТЕЛЬНО ссылайся на источники в формате [1], [2] и т.д., в конце статьи — список источников с URL
 - Каждое утверждение должно опираться на источник
@@ -618,7 +733,7 @@ async def fact_check(article: str, sources: Optional[list[str]] = None) -> str:
             "\n\nСписок РЕАЛЬНЫХ источников (ссылки в статье должны быть только из этого списка):\n"
             + "\n".join(f"{i + 1}. {u}" for i, u in enumerate(sources))
         )
-    prompt = f"""Проверь статью на ошибки. Для каждого утверждения:
+    prompt = f"""Проверь статью на ошибки. Отчёт о фактчекинге — на русском языке. Для каждого утверждения:
 1. Подтверждается ли фактами?
 2. Есть ли логические противоречия?
 3. Нет ли галлюцинаций (выдуманных ссылок/фактов)?
@@ -701,10 +816,12 @@ async def daily_trends() -> None:
         if not items:
             logger.warning("Ежедневная задача: тренды не собраны")
             return
-        topics = await extract_topics(items)
-        if topics:
-            await save_topics(topics)
-        logger.info("Ежедневная задача завершена: сохранено тем: %d", len(topics))
+        data = await extract_topics(items)
+        blocks = data.get("blocks") or []
+        total = sum(len(b.get("themes") or []) for b in blocks)
+        if total:
+            await save_topics(data)  # save_topics принимает структуру с блоками
+        logger.info("Ежедневная задача завершена: блоков: %d, тем: %d", len(blocks), total)
     except Exception as exc:
         logger.exception("Ошибка в ежедневном сборе трендов: %s", exc)
 
@@ -781,6 +898,10 @@ class ArticleRequestV2(BaseModel):
     plan_points: list[str]
 
 
+class ScheduleRequest(BaseModel):
+    time: str  # формат "HH:MM"
+
+
 @app.get("/")
 async def index() -> FileResponse:
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
@@ -804,6 +925,61 @@ async def api_status() -> dict:
     }
 
 
+_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+
+def _parse_time(value: str) -> tuple[int, int]:
+    """Валидирует время HH:MM (часы 00-23, минуты 00-59), возвращает (hours, minutes)."""
+    if not isinstance(value, str):
+        raise HTTPException(422, "Время должно быть строкой в формате HH:MM.")
+    m = _TIME_RE.match(value.strip())
+    if not m:
+        raise HTTPException(
+            422,
+            "Некорректное время: ожидается HH:MM (часы 00-23, минуты 00-59).",
+        )
+    return int(m.group(1)), int(m.group(2))
+
+
+def _next_daily_run() -> Optional[str]:
+    """Время следующего запуска задачи daily_trends (ISO) или None."""
+    if not scheduler:
+        return None
+    job = scheduler.get_job("daily_trends")
+    if job and job.next_run_time:
+        return job.next_run_time.isoformat()
+    return None
+
+
+@app.get("/api/settings/schedule")
+async def api_get_schedule() -> dict:
+    """Текущее время ежедневного сбора трендов и время следующего запуска."""
+    return {
+        "time": config.TRENDS_TIME,
+        "next_daily_run": _next_daily_run(),
+        "scheduler_running": bool(scheduler and scheduler.running),
+    }
+
+
+@app.post("/api/settings/schedule")
+async def api_set_schedule(payload: ScheduleRequest) -> dict:
+    """Меняет время ежедневного сбора трендов без перезапуска контейнера."""
+    hour, minute = _parse_time(payload.time)
+    time_str = f"{hour:02d}:{minute:02d}"
+    if not scheduler:
+        raise HTTPException(503, "Планировщик не запущен.")
+    try:
+        scheduler.reschedule_job(
+            "daily_trends", trigger="cron", hour=hour, minute=minute
+        )
+    except Exception as exc:
+        logger.error("Не удалось перепланировать daily_trends: %s", exc)
+        raise HTTPException(500, "Не удалось обновить расписание в планировщике.")
+    config.TRENDS_TIME = time_str
+    logger.info("Расписание ежедневного автосбора обновлено: %s", time_str)
+    return {"ok": True, "time": time_str, "next_daily_run": _next_daily_run()}
+
+
 @app.get("/api/platforms")
 async def api_platforms() -> dict:
     return {"platforms": config.PLATFORMS}
@@ -817,20 +993,28 @@ async def api_collect() -> dict:
     if not items:
         raise HTTPException(502, "Не удалось собрать тренды. Проверь логи и прокси.")
     pending_items = items  # сырые тренды сохраняем для возможного повторного использования
-    topics = await extract_topics(items)
-    pending_topics = topics
+    data = await extract_topics(items)
+    pending_topics = data
+    blocks = data.get("blocks") or []
+    count = sum(len(b.get("themes") or []) for b in blocks)
     state["last_collect"] = datetime.now().isoformat()
-    state["last_collect_count"] = len(topics)
-    return {"count": len(topics), "topics": topics}
+    state["last_collect_count"] = count
+    return {"count": count, "blocks": blocks}
 
 
 @app.post("/api/topics/select")
 async def api_select(payload: SelectTopicsRequest) -> dict:
-    """Сохраняет выбранные пользователем темы в БД (секция «Темы дня»)."""
+    """Сохраняет выбранные пользователем темы в БД (секция «Темы дня»).
+
+    Каждая тема может содержать поле block (название блока, из которого она
+    выбрана); если блока нет — сохраняется как «Темы».
+    """
     if not payload.topics:
         raise HTTPException(400, "Ни одна тема не выбрана.")
     clean = []
     for t in payload.topics:
+        if not isinstance(t, dict):
+            continue
         sources = [s for s in (t.get("sources") or []) if isinstance(s, str)]
         topic = (t.get("topic") or t.get("title") or "").strip()
         if not topic:
@@ -840,6 +1024,7 @@ async def api_select(payload: SelectTopicsRequest) -> dict:
             "description": (t.get("description") or "").strip(),
             "sources": sources,
             "source_count": len(sources),
+            "block": (t.get("block") or "").strip(),
         })
     if not clean:
         raise HTTPException(400, "Выбранные темы пустые.")
