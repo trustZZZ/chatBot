@@ -1,0 +1,5 @@
+INFO:     127.0.0.1:55551 - "GET /api/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55551 - "POST /api/articles/generate-v2 HTTP/1.1" 422 Unprocessable Content
+INFO:     127.0.0.1:55551 - "GET /api/topics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62204 - "GET /api/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62204 - "GET /api/topics HTTP/1.1" 200 OK
