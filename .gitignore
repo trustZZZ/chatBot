@@ -12,6 +12,20 @@ venv/
 .coverage
 htmlcov/
 
+# Логи сервера (uvicorn)
+*.log
+uvicorn_out.log
+uvicorn_err.log
+
+# База данных (SQLite)
+db/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
 # Docker
 docker-compose.override.yml
 .env

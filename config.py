@@ -1,5 +1,11 @@
 import os
 
+from dotenv import load_dotenv
+
+# Загрузка .env из папки проекта (для локального запуска).
+# В Docker переменные приходят из docker-compose и НЕ перезаписываются.
+load_dotenv()
+
 # === Веб-сервер ===
 WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
 WEB_PORT = int(os.getenv("WEB_PORT", "8000"))

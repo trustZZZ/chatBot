@@ -311,6 +311,77 @@
         white-space: nowrap;
         margin-top: 2px;
       }
+      .plan-sub {
+        font-size: 13px;
+        color: var(--accent);
+        margin: 14px 0 8px;
+        font-weight: 600;
+      }
+      .plan-lbl textarea {
+        display: block;
+        width: 100%;
+        margin-top: 4px;
+        resize: vertical;
+      }
+      .plan-section {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 12px;
+        margin-bottom: 10px;
+        background: var(--panel);
+      }
+      .sec-head {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-bottom: 6px;
+      }
+      .sec-head input {
+        flex: 1;
+      }
+      .sec-num {
+        font-size: 11px;
+        font-weight: 700;
+        color: var(--purple);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 2px 6px;
+        white-space: nowrap;
+      }
+      .sec-meta {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-top: 10px;
+      }
+      .sec-points {
+        margin-top: 6px;
+      }
+      .obj-row {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 12px;
+        margin-bottom: 10px;
+        background: var(--panel);
+      }
+      .obj-fields {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-bottom: 8px;
+      }
+      .obj-row > .btn {
+        float: right;
+      }
+      @media (max-width: 640px) {
+        .sec-meta,
+        .obj-fields {
+          grid-template-columns: 1fr;
+        }
+        .obj-row > .btn {
+          float: none;
+        }
+      }
       .hint {
         font-size: 12px;
         color: var(--muted);
@@ -401,10 +472,48 @@
         display: flex;
         gap: 8px;
         flex-wrap: wrap;
+        margin-top: 10px;
       }
-      .url-link {
+      .expert-block {
+        border: 1px solid rgba(188, 140, 255, 0.35);
+        background: rgba(188, 140, 255, 0.07);
+        border-radius: var(--radius);
+        padding: 10px 12px;
+        margin-bottom: 12px;
+      }
+      .expert-head {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+      }
+      .expert-rating {
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--yellow);
+      }
+      .expert-rec {
+        font-size: 12px;
+        padding: 3px 10px;
+        border-radius: 20px;
+        background: var(--panel2);
+        border: 1px solid var(--border);
+        color: var(--muted);
+      }
+      .expert-rec.ok {
         color: var(--green);
-        word-break: break-all;
+        border-color: rgba(63, 185, 80, 0.4);
+      }
+      .expert-rec.warn {
+        color: var(--yellow);
+        border-color: rgba(210, 153, 34, 0.4);
+      }
+      .expert-block details summary {
+        cursor: pointer;
+        font-size: 13px;
+        color: var(--accent);
+        user-select: none;
       }
       footer {
         padding: 20px 24px;
@@ -460,7 +569,7 @@
     <header>
       <div>
         <h1>📡 Trend Scanner</h1>
-        <div class="sub">Сбор трендов · генерация статей · публикация</div>
+        <div class="sub">Сбор трендов · генерация статей · экспертиза</div>
       </div>
       <div
         style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap"
@@ -526,7 +635,8 @@
 
       const $ = (id) => document.getElementById(id);
       const S = {
-        found_blocks: [], // блоки тем из последнего сбора («Найденные темы»)
+        // {blocks: [{block_name, themes}]} из /api/trends/collect («Найденные темы»)
+        found_blocks: { blocks: [] },
         checked: new Set(), // ключи "блок::индекс" отмеченных тем в «Найденные темы»
         topics: [], // выбранные темы в БД («Темы дня»)
         platform: {}, // topic_id -> выбранная платформа
@@ -625,10 +735,10 @@
       }
       function renderStats() {
         const st = STATUS?.state || {};
-        const foundTotal = (S.found_blocks || []).reduce(
-          (sum, b) => sum + (b.themes || []).length,
-          0,
-        );
+        const foundTotal = (
+          (S.found_blocks && S.found_blocks.blocks) ||
+          []
+        ).reduce((sum, b) => sum + (b.themes || []).length, 0);
         const nums = [
           {
             n: foundTotal || st.last_collect_count || 0,
@@ -684,7 +794,7 @@
       async function onCollect() {
         await busy($("btn-collect"), async () => {
           const data = await api("/api/trends/collect", { method: "POST" });
-          S.found_blocks = data.blocks || [];
+          S.found_blocks = { blocks: data.blocks || [] };
           S.checked.clear();
           renderTopics(data);
           await loadStatus();
@@ -692,11 +802,11 @@
         });
       }
       function renderTopics(data) {
-        // Принимает объект с blocks (как из /api/trends/collect) и рендерит
-        // каждый блок отдельно: заголовок блока + карточки тем с чекбоксами.
-        const blocks =
-          data && Array.isArray(data.blocks) ? data.blocks : S.found_blocks;
-        const allTopics = (blocks || []).reduce(
+        // Принимает объект с blocks (как из /api/trends/collect): {blocks: [...]}
+        // и рендерит каждый блок отдельно: заголовок блока + карточки тем с чекбоксами.
+        const src = data && data.blocks ? data : S.found_blocks || {};
+        const blocks = Array.isArray(src.blocks) ? src.blocks : [];
+        const allTopics = blocks.reduce(
           (acc, b) => acc.concat(b.themes || []),
           [],
         );
@@ -708,12 +818,12 @@
           : "";
         const wrap = $("found-topics");
         wrap.innerHTML = "";
-        (blocks || []).forEach((b, bi) => {
+        blocks.forEach((b, bi) => {
           const themes = b.themes || [];
           if (!themes.length) return;
           const header = document.createElement("div");
           header.className = "block-header";
-          header.textContent = "📂 " + (b.block_name || "Темы");
+          header.textContent = "📚 " + (b.block_name || "Темы");
           wrap.appendChild(header);
           themes.forEach((th, ti) =>
             wrap.appendChild(foundTopicCard(th, bi + "::" + ti)),
@@ -760,8 +870,9 @@
       }
       async function onSelect() {
         await busy($("btn-select"), async () => {
+          const blocks = (S.found_blocks && S.found_blocks.blocks) || [];
           const selected = [];
-          (S.found_blocks || []).forEach((b, bi) => {
+          blocks.forEach((b, bi) => {
             const blockName = (b.block_name || "Темы").trim();
             (b.themes || []).forEach((th, ti) => {
               if (!S.checked.has(bi + "::" + ti)) return;
@@ -811,7 +922,7 @@
         Object.keys(groups).forEach((g) => {
           const header = document.createElement("div");
           header.className = "block-header";
-          header.textContent = "📂 " + g;
+          header.textContent = "📚 " + g;
           wrap.appendChild(header);
           groups[g].forEach((t) => wrap.appendChild(topicCard(t)));
         });
@@ -855,7 +966,7 @@
             body: { platform: plat },
           });
           S.plansByTopic[topicId] = {
-            plans: data.plans,
+            plan: data.plan,
             platform_name: data.platform_name,
             style: data.style,
           };
@@ -876,65 +987,183 @@
           .addEventListener("click", () => row.remove());
         return row;
       }
+      function sectionBlock(s) {
+        s = s || {};
+        const div = document.createElement("div");
+        div.className = "plan-section";
+        div.innerHTML = `
+          <div class="sec-head">
+            <span class="sec-num">H2</span>
+            <input type="text" class="sec-heading" value="${esc(s.heading || "")}" placeholder="Заголовок раздела (H2)…">
+            <button class="btn small" data-act="del-section" title="Удалить раздел">➖ Удалить</button>
+          </div>
+          <label class="plan-lbl">Цель раздела
+            <textarea class="sec-purpose" rows="2" placeholder="Зачем нужен этот раздел в статье…">${esc(s.purpose || "")}</textarea>
+          </label>
+          <label class="plan-lbl">Ключевые тезисы (3–5)</label>
+          <div class="sec-points"></div>
+          <div class="t-actions" style="margin-top:6px">
+            <button class="btn small" data-act="add-point">➕ Тезис</button>
+          </div>
+          <div class="sec-meta">
+            <label class="plan-lbl">Тип контента
+              <input type="text" class="sec-type" value="${esc(s.content_type || "")}" placeholder="цифры / кейс / код / сравнение…">
+            </label>
+            <label class="plan-lbl">Объём (абзацы)
+              <input type="text" class="sec-len" value="${esc(s.estimated_length || "")}" placeholder="например, 3–4 абзаца">
+            </label>
+          </div>
+          <label class="plan-lbl">Связь с продуктом (мессенджером)
+            <textarea class="sec-product" rows="2" placeholder="Как показать ценность: интеграция, безопасность, скорость, API, автоматизация…">${esc(s.product_link || "")}</textarea>
+          </label>
+        `;
+        const ptsBox = div.querySelector(".sec-points");
+        const pts =
+          Array.isArray(s.points) && s.points.length ? s.points : [""];
+        pts.forEach((pt) => ptsBox.appendChild(pointRow(pt)));
+        div
+          .querySelector('[data-act="add-point"]')
+          .addEventListener("click", () => ptsBox.appendChild(pointRow("")));
+        div
+          .querySelector('[data-act="del-section"]')
+          .addEventListener("click", () => div.remove());
+        return div;
+      }
+      function objectionBlock(o) {
+        o = o || {};
+        const div = document.createElement("div");
+        div.className = "obj-row";
+        div.innerHTML = `
+          <div class="obj-fields">
+            <label class="plan-lbl">Возражение аудитории
+              <textarea class="obj-text" rows="2" placeholder="Например: боятся утечки данных…">${esc(o.objection || "")}</textarea>
+            </label>
+            <label class="plan-lbl">Как закрыто в статье
+              <textarea class="obj-counter" rows="2" placeholder="Контр-аргумент…">${esc(o.counter || "")}</textarea>
+            </label>
+          </div>
+          <button class="btn small" data-act="del-objection" title="Удалить возражение">➖ Удалить</button>
+        `;
+        div
+          .querySelector('[data-act="del-objection"]')
+          .addEventListener("click", () => div.remove());
+        return div;
+      }
       function renderPlans(topicId, store) {
         const box = $("plans-" + topicId);
+        const plan = (store && store.plan) || {};
         box.innerHTML = `<div class="hint" style="margin-bottom:6px">Платформа: <b>${esc(store.platform_name)}</b> · ${esc(store.style)}</div>`;
-        store.plans.forEach((p, i) => {
-          const div = document.createElement("div");
-          div.className = "plan";
-          div.dataset.topic = topicId;
-          div.dataset.idx = i;
-          div.innerHTML = `
-            <h4><span>📌 План ${esc(p.variant)}</span></h4>
-            <label class="plan-lbl">Заголовок плана
-              <input type="text" class="plan-title" value="${esc(p.title)}" placeholder="Заголовок статьи…">
-            </label>
-            <div class="plan-points"></div>
-            <div class="t-actions" style="margin-top:10px">
-              <button class="btn small" data-act="add-point">➕ Добавить пункт</button>
-              <button class="btn small primary" data-act="art">✍️ Отправить на генерацию статьи</button>
-            </div>
-            <div class="art-box" id="art-${topicId}-${i}"></div>
-          `;
-          const pointsBox = div.querySelector(".plan-points");
-          (p.points || []).forEach((pt) => pointsBox.appendChild(pointRow(pt)));
-          div
-            .querySelector('[data-act="add-point"]')
-            .addEventListener("click", () =>
-              pointsBox.appendChild(pointRow("")),
-            );
-          div
-            .querySelector('[data-act="art"]')
-            .addEventListener("click", () => onArticle(topicId, i));
-          box.appendChild(div);
+        const div = document.createElement("div");
+        div.className = "plan";
+        div.dataset.topic = topicId;
+        div.innerHTML = `
+          <h4><span>📌 План статьи</span></h4>
+          <label class="plan-lbl">Заголовок плана
+            <input type="text" class="plan-title" value="${esc(plan.title || "")}" placeholder="Заголовок статьи…">
+          </label>
+          <label class="plan-lbl">Краткое описание (для читателя)
+            <textarea class="plan-summary" rows="2" placeholder="О чём статья, для кого, какой результат получит читатель…">${esc(plan.summary || "")}</textarea>
+          </label>
+          <label class="plan-lbl">Целевая метрика конверсии
+            <textarea class="plan-conversion" rows="2" placeholder="Регистрация / запрос демо / отклик на вакансию и где это предложено в CTA…">${esc(plan.conversion_goal || "")}</textarea>
+          </label>
+          <div class="plan-sub">📐 Разделы</div>
+          <div class="plan-sections"></div>
+          <div class="plan-sub">🛡 Риски и возражения</div>
+          <div class="plan-objections"></div>
+          <div class="t-actions" style="margin-top:12px">
+            <button class="btn small" data-act="add-section">➕ Добавить раздел</button>
+            <button class="btn small" data-act="add-objection">➕ Добавить возражение</button>
+            <button class="btn small primary" data-act="art">✍️ Отправить на генерацию статьи</button>
+          </div>
+          <div class="art-box" id="art-${topicId}"></div>
+        `;
+        const sectionsBox = div.querySelector(".plan-sections");
+        const objectionsBox = div.querySelector(".plan-objections");
+        (Array.isArray(plan.sections) ? plan.sections : []).forEach((s) =>
+          sectionsBox.appendChild(sectionBlock(s)),
+        );
+        (Array.isArray(plan.objections) ? plan.objections : []).forEach((o) =>
+          objectionsBox.appendChild(objectionBlock(o)),
+        );
+        div
+          .querySelector('[data-act="add-section"]')
+          .addEventListener("click", () =>
+            sectionsBox.appendChild(sectionBlock({})),
+          );
+        div
+          .querySelector('[data-act="add-objection"]')
+          .addEventListener("click", () =>
+            objectionsBox.appendChild(objectionBlock({})),
+          );
+        div
+          .querySelector('[data-act="art"]')
+          .addEventListener("click", () => onArticle(topicId));
+        box.appendChild(div);
+      }
+      function secVal(root, sel) {
+        const el = root.querySelector(sel);
+        return el ? el.value.trim() : "";
+      }
+      function collectPlan(div) {
+        const val = (sel) => {
+          const el = div.querySelector(sel);
+          return el ? el.value.trim() : "";
+        };
+        const plan = {
+          title: val(".plan-title"),
+          summary: val(".plan-summary"),
+          conversion_goal: val(".plan-conversion"),
+          sections: [],
+          objections: [],
+        };
+        div.querySelectorAll(".plan-section").forEach((sec) => {
+          plan.sections.push({
+            heading: secVal(sec, ".sec-heading"),
+            purpose: secVal(sec, ".sec-purpose"),
+            points: Array.from(sec.querySelectorAll(".plan-point"))
+              .map((ta) => ta.value.trim())
+              .filter((s) => s.length > 0),
+            content_type: secVal(sec, ".sec-type"),
+            estimated_length: secVal(sec, ".sec-len"),
+            product_link: secVal(sec, ".sec-product"),
+          });
         });
+        div.querySelectorAll(".obj-row").forEach((o) => {
+          plan.objections.push({
+            objection: secVal(o, ".obj-text"),
+            counter: secVal(o, ".obj-counter"),
+          });
+        });
+        return plan;
       }
 
       // ---------- Статьи ----------
-      async function onArticle(topicId, planIdx) {
-        const div = document.querySelector(
-          `.plan[data-topic="${topicId}"][data-idx="${planIdx}"]`,
-        );
+      async function onArticle(topicId) {
+        const div = document.querySelector(`.plan[data-topic="${topicId}"]`);
         const plat = S.platform[topicId] || "habr";
-        const box = $("art-" + topicId + "-" + planIdx);
-        const planTitle =
-          div.querySelector(".plan-title").value.trim() || "Статья";
-        const planPoints = Array.from(div.querySelectorAll(".plan-point"))
-          .map((ta) => ta.value.trim())
-          .filter((s) => s.length > 0);
-        if (!planPoints.length) {
-          toast("Добавь хотя бы один пункт плана.", "err");
+        const box = $("art-" + topicId);
+        const plan = collectPlan(div);
+        const filled =
+          plan.title ||
+          plan.summary ||
+          plan.conversion_goal ||
+          plan.sections.some((s) => s.heading || s.purpose || s.points.length);
+        if (!filled) {
+          toast(
+            "План пуст: заполни заголовок, описание или хотя бы один раздел.",
+            "err",
+          );
           return;
         }
-        box.innerHTML = `<p class="hint"><span class="loader"></span>Генерация статьи + фактчекинг… (1–3 мин)</p>`;
+        box.innerHTML = `<p class="hint"><span class="loader"></span>Генерация статьи… (1–3 мин)</p>`;
         try {
           const data = await api("/api/articles/generate-v2", {
             method: "POST",
             body: {
               topic_id: topicId,
               platform: plat,
-              plan_title: planTitle,
-              plan_points: planPoints,
+              plan: plan,
             },
           });
           box.innerHTML = "";
@@ -951,33 +1180,66 @@
         }
         $("articles-count").textContent = "(" + wrap.children.length + ")";
       }
+      function expertRecClass(rec) {
+        const r = String(rec || "").toLowerCase();
+        if (r.includes("готов")) return "expert-rec ok";
+        if (r.includes("доработ")) return "expert-rec warn";
+        return "expert-rec";
+      }
       function articleCard(a) {
         const div = document.createElement("div");
         div.className = "card";
         div.dataset.artId = a.id;
-        const url = a.published_url || "";
+        const expert = !!(a.final_content && a.expert_report);
+        const body = expert ? a.final_content : a.article || "";
         div.innerHTML = `
           <div class="badge">${esc(a.platform_name || a.platform || "")}</div>
-          <div class="badge">${a.status === "published" ? "✅ опубликована" : "📝 черновик"}</div>
+          <div class="badge">${a.status === "published" ? "✅ опубликована" : a.status === "expertised" ? "🧪 проверена" : "📝 черновик"}</div>
           <div class="t-title">${esc(a.plan_title || a.topic_title || "Статья")}</div>
-          ${url ? `<div class="hint">🔗 <a class="url-link" href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a></div>` : ""}
-          <details>
-            <summary>🔍 Фактчекинг</summary>
-            <div class="factcheck">${esc(a.factcheck || "отчёт недоступен")}</div>
-          </details>
-          <div class="article-body">${a.article || ""}</div>
+          ${
+            expert
+              ? `
+          <div class="expert-block">
+            <div class="expert-head">
+              <span class="expert-rating">⭐ Рейтинг: ${a.expert_rating}/10</span>
+              <span class="${expertRecClass(a.expert_recommendation)}">${esc(a.expert_recommendation)}</span>
+            </div>
+            <details>
+              <summary>📋 Отчёт экспертизы</summary>
+              <div class="factcheck">${esc(a.expert_report)}</div>
+            </details>
+          </div>`
+              : ""
+          }
+          <div class="article-body">${body}</div>
           <div class="art-actions">
-            <button class="btn small green" data-act="pub" data-id="${a.id}">📤 Опубликовать на Telegraph</button>
-            <button class="btn small" data-act="copy-h">📋 Копировать HTML</button>
-            <button class="btn small" data-act="copy-t">📋 Копировать текст</button>
+            ${
+              expert
+                ? `<button class="btn small primary" data-act="copy-final">📋 Копировать финальный текст</button>`
+                : `<button class="btn small green" data-act="expert" data-id="${a.id}">🔍 Отправить на экспертизу</button>
+                 <button class="btn small" data-act="copy-h">📋 Копировать HTML</button>
+                 <button class="btn small" data-act="copy-t">📋 Копировать текст</button>`
+            }
           </div>
         `;
-        div
-          .querySelector('[data-act="pub"]')
-          .addEventListener("click", () => onPublish(a.id));
-        div
-          .querySelector('[data-act="copy-h"]')
-          .addEventListener("click", async () => {
+        const expBtn = div.querySelector('[data-act="expert"]');
+        if (expBtn) {
+          expBtn.addEventListener("click", () => onExpertise(a.id, div));
+        }
+        const copyFinal = div.querySelector('[data-act="copy-final"]');
+        if (copyFinal) {
+          copyFinal.addEventListener("click", async () => {
+            try {
+              await navigator.clipboard.writeText(a.final_content || "");
+              toast("Финальный текст скопирован", "ok");
+            } catch (e) {
+              toast("Не удалось скопировать: " + e.message, "err");
+            }
+          });
+        }
+        const copyH = div.querySelector('[data-act="copy-h"]');
+        if (copyH) {
+          copyH.addEventListener("click", async () => {
             try {
               await navigator.clipboard.writeText(a.article || "");
               toast("HTML скопирован", "ok");
@@ -985,9 +1247,10 @@
               toast("Не удалось скопировать: " + e.message, "err");
             }
           });
-        div
-          .querySelector('[data-act="copy-t"]')
-          .addEventListener("click", async () => {
+        }
+        const copyT = div.querySelector('[data-act="copy-t"]');
+        if (copyT) {
+          copyT.addEventListener("click", async () => {
             try {
               await navigator.clipboard.writeText(stripHtml(a.article));
               toast("Текст скопирован", "ok");
@@ -995,29 +1258,37 @@
               toast("Не удалось скопировать: " + e.message, "err");
             }
           });
+        }
         return div;
       }
-      async function onPublish(articleId) {
-        const btn = document.querySelector(
-          `[data-act="pub"][data-id="${articleId}"]`,
-        );
-        if (btn) btn.disabled = true;
+      async function onExpertise(articleId, card) {
+        const btn = card.querySelector('[data-act="expert"]');
+        if (!btn) return;
+        const oldHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<span class="loader"></span> Экспертиза…';
         try {
-          const data = await api(`/api/articles/${articleId}/publish`, {
+          const data = await api(`/api/articles/${articleId}/expertise`, {
             method: "POST",
           });
-          const card = document.querySelector(`[data-art-id="${articleId}"]`);
-          if (card) {
-            card.insertAdjacentHTML(
-              "afterbegin",
-              `<div class="hint">🔗 Опубликовано: <a class="url-link" href="${esc(data.url)}" target="_blank" rel="noopener">${esc(data.url)}</a></div>`,
-            );
-          }
-          toast("Опубликовано на Telegraph", "ok");
+          const idx = S.articles.findIndex((x) => x.id === articleId);
+          const old = idx !== -1 ? S.articles[idx] : {};
+          const merged = {
+            ...old,
+            article: data.final_text || old.article,
+            final_content: data.final_text,
+            expert_report: data.report,
+            expert_rating: data.rating,
+            expert_recommendation: data.recommendation,
+            status: "expertised",
+          };
+          if (idx !== -1) S.articles[idx] = merged;
+          card.replaceWith(articleCard(merged));
+          toast("Экспертиза завершена: рейтинг " + data.rating + "/10", "ok");
         } catch (e) {
           toast(e.message, "err");
-        } finally {
-          if (btn) btn.disabled = false;
+          btn.disabled = false;
+          btn.innerHTML = oldHtml;
         }
       }
       async function loadArticles() {
