@@ -256,6 +256,32 @@
       .plan li {
         margin-bottom: 2px;
       }
+      .plan-lbl {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+        margin: 10px 0 4px;
+      }
+      .plan-lbl input {
+        display: block;
+        width: 100%;
+        margin-top: 4px;
+      }
+      .point-row {
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+        margin-bottom: 8px;
+      }
+      .point-row textarea {
+        flex: 1;
+        resize: vertical;
+        min-height: 44px;
+      }
+      .point-row .btn {
+        white-space: nowrap;
+        margin-top: 2px;
+      }
       .hint {
         font-size: 12px;
         color: var(--muted);
@@ -347,37 +373,6 @@
         gap: 8px;
         flex-wrap: wrap;
       }
-      .app-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-        gap: 12px;
-      }
-      .app-card {
-        background: var(--panel2);
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        padding: 12px 14px;
-        font-size: 13px;
-      }
-      .app-card .nm {
-        font-weight: 600;
-        font-size: 14px;
-        margin-bottom: 4px;
-      }
-      .app-card .meta {
-        color: var(--muted);
-        margin-top: 4px;
-        font-size: 12px;
-      }
-      form.app-form {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 10px;
-        margin-bottom: 16px;
-      }
-      form.app-form .full {
-        grid-column: 1/-1;
-      }
       .url-link {
         color: var(--green);
         word-break: break-all;
@@ -426,9 +421,6 @@
         }
       }
       @media (max-width: 640px) {
-        form.app-form {
-          grid-template-columns: 1fr;
-        }
         main {
           padding: 16px;
         }
@@ -452,17 +444,20 @@
           <button class="btn primary" id="btn-collect">
             🔄 Собрать тренды
           </button>
-          <button class="btn green" id="btn-rank" disabled>
-            🧠 Отранжировать (LLM)
-          </button>
           <button class="btn" id="btn-refresh">🗂 Обновить списки</button>
         </div>
         <div class="stats" id="stats"></div>
       </section>
 
-      <section id="raw-section" hidden>
-        <h2>🌐 Последний сбор <span class="count" id="raw-count"></span></h2>
-        <ol id="raw-list"></ol>
+      <section id="found-section" hidden>
+        <h2>🌐 Найденные темы <span class="count" id="found-count"></span></h2>
+        <div class="toolbar">
+          <button class="btn green" id="btn-select" disabled>
+            ✅ Выбрать отмеченные
+          </button>
+          <span class="hint" id="found-hint"></span>
+        </div>
+        <div id="found-topics"></div>
       </section>
 
       <section>
@@ -473,44 +468,6 @@
       <section>
         <h2>📄 Статьи <span class="count" id="articles-count"></span></h2>
         <div id="articles"></div>
-      </section>
-
-      <section>
-        <h2>
-          🤝 Заявки на коллаборацию <span class="count" id="apps-count"></span>
-        </h2>
-        <form class="app-form" id="app-form">
-          <input
-            type="text"
-            id="app-name"
-            placeholder="Как вас зовут?"
-            required
-          />
-          <select id="app-role" required>
-            <option value="Разработка">💻 Разработка</option>
-            <option value="Дизайн">🎨 Дизайн</option>
-            <option value="Продакт">📊 Продакт</option>
-            <option value="Партнёрство">🤝 Партнёрство</option>
-          </select>
-          <input
-            type="text"
-            id="app-skills"
-            class="full"
-            placeholder="Навыки / стек (через запятую)"
-            required
-          />
-          <input
-            type="text"
-            id="app-contact"
-            class="full"
-            placeholder="Контакт (Telegram или почта)"
-            required
-          />
-          <button type="submit" class="btn primary full">
-            📨 Отправить заявку
-          </button>
-        </form>
-        <div id="applications"></div>
       </section>
     </main>
 
@@ -525,13 +482,12 @@
 
       const $ = (id) => document.getElementById(id);
       const S = {
-        raw: [],
-        topics: [],
-        reasons: {}, // id -> reason (приходит из ранжирования)
+        foundTopics: [], // темы из последнего сбора («Найденные темы»)
+        checked: new Set(), // индексы отмеченных тем в «Найденные темы»
+        topics: [], // выбранные темы в БД («Темы дня»)
         platform: {}, // topic_id -> выбранная платформа
         plansByTopic: {}, // topic_id -> {plans, platform_name, style}
         articles: [],
-        apps: [],
         platforms: [],
       };
 
@@ -628,12 +584,11 @@
         const nums = [
           {
             n: st.last_collect_count || 0,
-            l: "Собрано трендов",
+            l: "Найдено тем",
             t: st.last_collect ? fmtDt(st.last_collect) : "",
           },
           { n: S.topics.length, l: "Тем в БД" },
           { n: S.articles.length, l: "Статей" },
-          { n: S.apps.length, l: "Заявок" },
           {
             n: st.last_daily ? "✓" : "—",
             l: "Последний автосбор",
@@ -650,61 +605,95 @@
           .join("");
       }
 
-      // ---------- Сбор и ранжирование ----------
+      // ---------- Сбор трендов → найденные темы ----------
       async function onCollect() {
         await busy($("btn-collect"), async () => {
           const data = await api("/api/trends/collect", { method: "POST" });
-          S.raw = data.items;
-          $("btn-rank").disabled = false;
-          renderRaw();
+          S.foundTopics = data.topics || [];
+          S.checked.clear();
+          renderFound();
           await loadStatus();
-          toast(`Собрано трендов: ${data.count}`, "ok");
+          toast(`Найдено тем: ${data.count}`, "ok");
         });
       }
-      function renderRaw() {
-        const sec = $("raw-section");
-        sec.hidden = !S.raw.length;
-        $("raw-count").textContent = "(" + S.raw.length + ")";
-        $("raw-list").innerHTML = "";
-        S.raw.slice(0, 50).forEach((it) => {
-          const li = document.createElement("li");
-          li.style.cssText = "margin-bottom:6px; font-size:14px";
-          const badge =
-            `<span class="badge">${esc(it.source)}</span>` +
-            (it.score ? `<span class="badge score">★ ${it.score}</span>` : "");
-          const link = it.url
-            ? `<a href="${esc(it.url)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(it.title)}</a>`
-            : esc(it.title);
-          li.innerHTML = badge + " " + link;
-          $("raw-list").appendChild(li);
-        });
-        if (S.raw.length > 50)
-          $("raw-list").insertAdjacentHTML(
-            "beforeend",
-            `<li class="hint">… ещё ${S.raw.length - 50} шт.</li>`,
-          );
+      function renderFound() {
+        const sec = $("found-section");
+        sec.hidden = !S.foundTopics.length;
+        $("found-count").textContent = "(" + S.foundTopics.length + ")";
+        $("found-hint").textContent = S.foundTopics.length
+          ? "Отметь темы, которые хочешь развить в статью."
+          : "";
+        const wrap = $("found-topics");
+        wrap.innerHTML = "";
+        S.foundTopics.forEach((t, idx) =>
+          wrap.appendChild(foundTopicCard(t, idx)),
+        );
+        updateSelectBtn();
       }
-      async function onRank() {
-        await busy($("btn-rank"), async () => {
-          const data = await api("/api/topics/rank", {
+      function foundTopicCard(t, idx) {
+        const card = document.createElement("div");
+        card.className = "card";
+        const sources = t.sources || [];
+        const srcCount = Number(t.source_count) || sources.length || 0;
+        card.innerHTML = `
+          <label style="display:flex; gap:12px; align-items:flex-start; cursor:pointer">
+            <input type="checkbox" class="found-check" data-idx="${idx}"
+                   style="width:17px; height:17px; margin-top:3px; accent-color:var(--green)">
+            <div style="flex:1">
+              <div class="t-title" style="margin-top:0">${esc(t.topic)}</div>
+              ${t.description ? `<div class="t-reason">📝 ${esc(t.description)}</div>` : ""}
+              <div class="hint">🗞 Источников: <b>${srcCount}</b></div>
+              ${
+                sources.length
+                  ? `<details><summary>🔗 Источники (${sources.length})</summary>
+                      <ul style="margin:8px 0 0 20px; font-size:13px">
+                        ${sources.map((u) => `<li><a href="${esc(u)}" target="_blank" rel="noopener" style="color:var(--accent); word-break:break-all">${esc(u)}</a></li>`).join("")}
+                      </ul>
+                     </details>`
+                  : ""
+              }
+            </div>
+          </label>
+        `;
+        const chk = card.querySelector(".found-check");
+        chk.checked = S.checked.has(idx);
+        chk.addEventListener("change", () => {
+          if (chk.checked) S.checked.add(idx);
+          else S.checked.delete(idx);
+          updateSelectBtn();
+        });
+        return card;
+      }
+      function updateSelectBtn() {
+        $("btn-select").disabled = S.checked.size === 0;
+      }
+      async function onSelect() {
+        await busy($("btn-select"), async () => {
+          const selected = S.foundTopics
+            .filter((_, idx) => S.checked.has(idx))
+            .map((t) => ({
+              topic: t.topic,
+              description: t.description,
+              sources: t.sources || [],
+              source_count:
+                Number(t.source_count) || (t.sources || []).length || 0,
+            }));
+          if (!selected.length) throw new Error("Отметь хотя бы одну тему.");
+          const data = await api("/api/topics/select", {
             method: "POST",
-            body: {},
+            body: { topics: selected },
           });
-          data.topics.forEach((t) => {
-            S.reasons[t.id] = t.reason;
-          });
+          S.checked.clear();
+          renderFound();
           await loadTopics();
-          toast(`Отобрано тем: ${data.topics.length}`, "ok");
+          toast(`Сохранено тем в «Темы дня»: ${data.saved}`, "ok");
         });
       }
 
-      // ---------- Темы ----------
+      // ---------- Темы дня ----------
       async function loadTopics() {
         const data = await api("/api/topics");
         S.topics = data.topics;
-        Object.keys(S.reasons).forEach((id) => {
-          if (!S.topics.some((t) => t.id === Number(id))) delete S.reasons[id];
-        });
         renderTopics();
         renderStats();
       }
@@ -713,7 +702,7 @@
         const wrap = $("topics");
         wrap.innerHTML = "";
         if (!S.topics.length) {
-          wrap.innerHTML = `<p class="empty">Пока нет тем. Нажми «🔄 Собрать тренды», затем «🧠 Отранжировать (LLM)».</p>`;
+          wrap.innerHTML = `<p class="empty">Пока нет тем. Собери тренды и отметь понравившиеся темы в «🌐 Найденные темы».</p>`;
           return;
         }
         S.topics.slice(0, 20).forEach((t) => wrap.appendChild(topicCard(t)));
@@ -721,19 +710,20 @@
       function topicCard(t) {
         const card = document.createElement("div");
         card.className = "card";
-        const reason = S.reasons[t.id] || "";
         const plat = S.platform[t.id] || "habr";
         const hasPlans = S.plansByTopic[t.id];
+        const srcCount =
+          Number(t.source_count) || (t.sources || []).length || 0;
         card.innerHTML = `
-          <div class="badge">${esc(t.source || "—")}</div>
+          <div class="badge">🗞 ${srcCount} источн.</div>
           <div class="badge">📅 ${fmtDt(t.date)}</div>
+          ${t.description ? `<div class="t-reason">📝 ${esc(t.description)}</div>` : ""}
           <div class="t-title">${esc(t.title)}</div>
-          ${reason ? `<div class="t-reason">💡 ${esc(reason)}</div>` : ""}
           <div class="t-actions">
             <select class="plat-select" data-topic="${t.id}" title="Платформа для стиля статьи">
               ${S.platforms.map((p) => `<option value="${esc(p.key)}" ${p.key === plat ? "selected" : ""}>${esc(p.name)}</option>`).join("")}
             </select>
-            <button class="btn small" data-act="plans" data-id="${t.id}">🎯 Сгенерировать планы</button>
+            <button class="btn small" data-act="plans" data-id="${t.id}">🎯 Сгенерировать план</button>
           </div>
           <div class="plans" id="plans-${t.id}"></div>
         `;
@@ -765,18 +755,45 @@
           box.innerHTML = `<p class="error">${esc(e.message)}</p>`;
         }
       }
+      function pointRow(value) {
+        const row = document.createElement("div");
+        row.className = "point-row";
+        row.innerHTML = `
+          <textarea class="plan-point" rows="2" placeholder="Пункт плана…">${esc(value)}</textarea>
+          <button class="btn small" data-act="del-point" title="Удалить пункт">➖ Удалить</button>
+        `;
+        row
+          .querySelector('[data-act="del-point"]')
+          .addEventListener("click", () => row.remove());
+        return row;
+      }
       function renderPlans(topicId, store) {
         const box = $("plans-" + topicId);
         box.innerHTML = `<div class="hint" style="margin-bottom:6px">Платформа: <b>${esc(store.platform_name)}</b> · ${esc(store.style)}</div>`;
         store.plans.forEach((p, i) => {
           const div = document.createElement("div");
           div.className = "plan";
+          div.dataset.topic = topicId;
+          div.dataset.idx = i;
           div.innerHTML = `
-            <h4><span>📌 План ${esc(p.variant)}: ${esc(p.title)}</span></h4>
-            <ul>${(p.points || []).map((pt) => `<li>${esc(pt)}</li>`).join("")}</ul>
-            <button class="btn small primary" data-act="art" data-topic="${topicId}" data-idx="${i}">✍️ Сгенерировать статью</button>
+            <h4><span>📌 План ${esc(p.variant)}</span></h4>
+            <label class="plan-lbl">Заголовок плана
+              <input type="text" class="plan-title" value="${esc(p.title)}" placeholder="Заголовок статьи…">
+            </label>
+            <div class="plan-points"></div>
+            <div class="t-actions" style="margin-top:10px">
+              <button class="btn small" data-act="add-point">➕ Добавить пункт</button>
+              <button class="btn small primary" data-act="art">✍️ Отправить на генерацию статьи</button>
+            </div>
             <div class="art-box" id="art-${topicId}-${i}"></div>
           `;
+          const pointsBox = div.querySelector(".plan-points");
+          (p.points || []).forEach((pt) => pointsBox.appendChild(pointRow(pt)));
+          div
+            .querySelector('[data-act="add-point"]')
+            .addEventListener("click", () =>
+              pointsBox.appendChild(pointRow("")),
+            );
           div
             .querySelector('[data-act="art"]')
             .addEventListener("click", () => onArticle(topicId, i));
@@ -786,13 +803,30 @@
 
       // ---------- Статьи ----------
       async function onArticle(topicId, planIdx) {
+        const div = document.querySelector(
+          `.plan[data-topic="${topicId}"][data-idx="${planIdx}"]`,
+        );
         const plat = S.platform[topicId] || "habr";
         const box = $("art-" + topicId + "-" + planIdx);
+        const planTitle =
+          div.querySelector(".plan-title").value.trim() || "Статья";
+        const planPoints = Array.from(div.querySelectorAll(".plan-point"))
+          .map((ta) => ta.value.trim())
+          .filter((s) => s.length > 0);
+        if (!planPoints.length) {
+          toast("Добавь хотя бы один пункт плана.", "err");
+          return;
+        }
         box.innerHTML = `<p class="hint"><span class="loader"></span>Генерация статьи + фактчекинг… (1–3 мин)</p>`;
         try {
-          const data = await api("/api/articles/generate", {
+          const data = await api("/api/articles/generate-v2", {
             method: "POST",
-            body: { topic_id: topicId, plan_index: planIdx, platform: plat },
+            body: {
+              topic_id: topicId,
+              platform: plat,
+              plan_title: planTitle,
+              plan_points: planPoints,
+            },
           });
           box.innerHTML = "";
           prependArticle(data);
@@ -884,68 +918,18 @@
         const wrap = $("articles");
         wrap.innerHTML = "";
         if (!S.articles.length) {
-          wrap.innerHTML = `<p class="empty">Статей пока нет. Выбери тему → «Сгенерировать планы» → план → «Сгенерировать статью».</p>`;
+          wrap.innerHTML = `<p class="empty">Статей пока нет. Выбери тему → «Сгенерировать план» → отредактируй → «Отправить на генерацию статьи».</p>`;
           return;
         }
         S.articles.forEach((a) => wrap.appendChild(articleCard(a)));
         renderStats();
       }
 
-      // ---------- Заявки ----------
-      async function loadApps() {
-        const data = await api("/api/applications");
-        S.apps = data.applications;
-        $("apps-count").textContent = "(" + S.apps.length + ")";
-        const wrap = $("applications");
-        wrap.innerHTML = "";
-        if (!S.apps.length) {
-          wrap.innerHTML = `<p class="empty">Заявок нет.</p>`;
-          return;
-        }
-        S.apps.forEach((a) => {
-          const card = document.createElement("div");
-          card.className = "app-card";
-          card.innerHTML = `
-            <div class="nm">${esc(a.name)}</div>
-            <div>💼 ${esc(a.role)}</div>
-            <div>🛠 ${esc(a.skills)}</div>
-            <div>📫 ${esc(a.contact)}</div>
-            <div class="meta">📅 ${fmtDt(a.created_at)} · <a href="#" class="del" data-id="${a.id}" style="color:var(--red)">удалить</a></div>
-          `;
-          card.querySelector(".del").addEventListener("click", async (ev) => {
-            ev.preventDefault();
-            await api(`/api/applications/${a.id}`, { method: "DELETE" });
-            await loadApps();
-            toast("Заявка удалена", "ok");
-          });
-          wrap.appendChild(card);
-        });
-        renderStats();
-      }
-      async function onAppSubmit(ev) {
-        ev.preventDefault();
-        const payload = {
-          name: $("app-name").value.trim(),
-          role: $("app-role").value,
-          skills: $("app-skills").value.trim(),
-          contact: $("app-contact").value.trim(),
-        };
-        if (!payload.name || !payload.skills || !payload.contact) return;
-        const btn = ev.target.querySelector("button[type=submit]");
-        await busy(btn, async () => {
-          await api("/api/applications", { method: "POST", body: payload });
-          ev.target.reset();
-          await loadApps();
-          toast("Заявка отправлена!", "ok");
-        });
-      }
-
       // ---------- Инициализация ----------
       async function init() {
         $("btn-collect").addEventListener("click", onCollect);
-        $("btn-rank").addEventListener("click", onRank);
+        $("btn-select").addEventListener("click", onSelect);
         $("btn-refresh").addEventListener("click", refreshAll);
-        $("app-form").addEventListener("submit", onAppSubmit);
         await refreshAll();
       }
       async function refreshAll() {
@@ -956,7 +940,6 @@
             loadPlatforms(),
             loadTopics(),
             loadArticles(),
-            loadApps(),
           ]);
         } finally {
           $("btn-refresh").disabled = false;

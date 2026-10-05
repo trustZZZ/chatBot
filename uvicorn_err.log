@@ -1,0 +1,10 @@
+2026-10-05 02:00:03 | WARNING  | trend_bot | DEEPSEEK_API_KEY не задан Ч LLM-функции будут использовать fallback.
+INFO:     Started server process [18484]
+INFO:     Waiting for application startup.
+2026-10-05 02:00:03 | INFO     | trend_bot | Ѕаза данных инициализирована: /app/db/bot.db
+2026-10-05 02:00:03 | INFO     | apscheduler.scheduler | Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-10-05 02:00:03 | INFO     | apscheduler.scheduler | Added job "daily_trends" to job store "default"
+2026-10-05 02:00:03 | INFO     | apscheduler.scheduler | Scheduler started
+2026-10-05 02:00:03 | INFO     | trend_bot | ѕланировщик запущен: ежедневный сбор трендов в 09:00
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
