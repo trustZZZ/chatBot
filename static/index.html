@@ -80,6 +80,22 @@
         color: var(--red);
         border-color: rgba(248, 81, 73, 0.4);
       }
+      .sched {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .sched-label {
+        font-size: 12px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      #schedule-time {
+        padding: 5px 8px;
+        font-size: 13px;
+        width: 132px;
+        color-scheme: dark;
+      }
       main {
         max-width: 1100px;
         margin: 0 auto;
@@ -178,6 +194,19 @@
         color: var(--muted);
         font-size: 14px;
         padding: 12px 0;
+      }
+      .block-header {
+        font-size: 13px;
+        font-weight: 700;
+        color: var(--accent);
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        margin: 18px 0 8px;
+        padding-bottom: 6px;
+        border-bottom: 1px solid var(--border);
+      }
+      .block-header:first-child {
+        margin-top: 0;
       }
       .badge {
         display: inline-block;
@@ -433,8 +462,23 @@
         <h1>📡 Trend Scanner</h1>
         <div class="sub">Сбор трендов · генерация статей · публикация</div>
       </div>
-      <div class="chips" id="status-chips">
-        <span class="chip">загрузка…</span>
+      <div
+        style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap"
+      >
+        <div class="chips" id="status-chips">
+          <span class="chip">загрузка…</span>
+        </div>
+        <div class="sched">
+          <label class="sched-label" for="schedule-time">⏰ Сбор:</label>
+          <input
+            type="time"
+            id="schedule-time"
+            title="Время ежедневного автосбора (МСК)"
+          />
+          <button class="btn small" id="btn-save-schedule">
+            💾 Сохранить время
+          </button>
+        </div>
       </div>
     </header>
 
@@ -482,8 +526,8 @@
 
       const $ = (id) => document.getElementById(id);
       const S = {
-        foundTopics: [], // темы из последнего сбора («Найденные темы»)
-        checked: new Set(), // индексы отмеченных тем в «Найденные темы»
+        found_blocks: [], // блоки тем из последнего сбора («Найденные темы»)
+        checked: new Set(), // ключи "блок::индекс" отмеченных тем в «Найденные темы»
         topics: [], // выбранные темы в БД («Темы дня»)
         platform: {}, // topic_id -> выбранная платформа
         plansByTopic: {}, // topic_id -> {plans, platform_name, style}
@@ -581,10 +625,14 @@
       }
       function renderStats() {
         const st = STATUS?.state || {};
+        const foundTotal = (S.found_blocks || []).reduce(
+          (sum, b) => sum + (b.themes || []).length,
+          0,
+        );
         const nums = [
           {
-            n: st.last_collect_count || 0,
-            l: "Найдено тем",
+            n: foundTotal || st.last_collect_count || 0,
+            l: "Собрано трендов",
             t: st.last_collect ? fmtDt(st.last_collect) : "",
           },
           { n: S.topics.length, l: "Тем в БД" },
@@ -605,39 +653,82 @@
           .join("");
       }
 
+      // ---------- Расписание автосбора ----------
+      async function loadSchedule() {
+        try {
+          const data = await api("/api/settings/schedule");
+          if (data && data.time) $("schedule-time").value = data.time;
+        } catch (e) {
+          toast("Не удалось получить расписание: " + e.message, "err");
+        }
+      }
+      async function onSaveSchedule() {
+        const el = $("schedule-time");
+        const time = el.value;
+        if (!time) {
+          toast("Выбери время сбора (HH:MM).", "err");
+          return;
+        }
+        await busy($("btn-save-schedule"), async () => {
+          const data = await api("/api/settings/schedule", {
+            method: "POST",
+            body: { time: time },
+          });
+          if (data && data.time) el.value = data.time;
+          toast("Время сбора обновлено", "ok");
+          await loadStatus();
+        });
+      }
+
       // ---------- Сбор трендов → найденные темы ----------
       async function onCollect() {
         await busy($("btn-collect"), async () => {
           const data = await api("/api/trends/collect", { method: "POST" });
-          S.foundTopics = data.topics || [];
+          S.found_blocks = data.blocks || [];
           S.checked.clear();
-          renderFound();
+          renderTopics(data);
           await loadStatus();
           toast(`Найдено тем: ${data.count}`, "ok");
         });
       }
-      function renderFound() {
+      function renderTopics(data) {
+        // Принимает объект с blocks (как из /api/trends/collect) и рендерит
+        // каждый блок отдельно: заголовок блока + карточки тем с чекбоксами.
+        const blocks =
+          data && Array.isArray(data.blocks) ? data.blocks : S.found_blocks;
+        const allTopics = (blocks || []).reduce(
+          (acc, b) => acc.concat(b.themes || []),
+          [],
+        );
         const sec = $("found-section");
-        sec.hidden = !S.foundTopics.length;
-        $("found-count").textContent = "(" + S.foundTopics.length + ")";
-        $("found-hint").textContent = S.foundTopics.length
+        sec.hidden = !allTopics.length;
+        $("found-count").textContent = "(" + allTopics.length + ")";
+        $("found-hint").textContent = allTopics.length
           ? "Отметь темы, которые хочешь развить в статью."
           : "";
         const wrap = $("found-topics");
         wrap.innerHTML = "";
-        S.foundTopics.forEach((t, idx) =>
-          wrap.appendChild(foundTopicCard(t, idx)),
-        );
+        (blocks || []).forEach((b, bi) => {
+          const themes = b.themes || [];
+          if (!themes.length) return;
+          const header = document.createElement("div");
+          header.className = "block-header";
+          header.textContent = "📂 " + (b.block_name || "Темы");
+          wrap.appendChild(header);
+          themes.forEach((th, ti) =>
+            wrap.appendChild(foundTopicCard(th, bi + "::" + ti)),
+          );
+        });
         updateSelectBtn();
       }
-      function foundTopicCard(t, idx) {
+      function foundTopicCard(t, key) {
         const card = document.createElement("div");
         card.className = "card";
         const sources = t.sources || [];
         const srcCount = Number(t.source_count) || sources.length || 0;
         card.innerHTML = `
           <label style="display:flex; gap:12px; align-items:flex-start; cursor:pointer">
-            <input type="checkbox" class="found-check" data-idx="${idx}"
+            <input type="checkbox" class="found-check" data-key="${key}"
                    style="width:17px; height:17px; margin-top:3px; accent-color:var(--green)">
             <div style="flex:1">
               <div class="t-title" style="margin-top:0">${esc(t.topic)}</div>
@@ -656,10 +747,10 @@
           </label>
         `;
         const chk = card.querySelector(".found-check");
-        chk.checked = S.checked.has(idx);
+        chk.checked = S.checked.has(key);
         chk.addEventListener("change", () => {
-          if (chk.checked) S.checked.add(idx);
-          else S.checked.delete(idx);
+          if (chk.checked) S.checked.add(key);
+          else S.checked.delete(key);
           updateSelectBtn();
         });
         return card;
@@ -669,22 +760,28 @@
       }
       async function onSelect() {
         await busy($("btn-select"), async () => {
-          const selected = S.foundTopics
-            .filter((_, idx) => S.checked.has(idx))
-            .map((t) => ({
-              topic: t.topic,
-              description: t.description,
-              sources: t.sources || [],
-              source_count:
-                Number(t.source_count) || (t.sources || []).length || 0,
-            }));
+          const selected = [];
+          (S.found_blocks || []).forEach((b, bi) => {
+            const blockName = (b.block_name || "Темы").trim();
+            (b.themes || []).forEach((th, ti) => {
+              if (!S.checked.has(bi + "::" + ti)) return;
+              selected.push({
+                topic: th.topic,
+                description: th.description,
+                sources: th.sources || [],
+                source_count:
+                  Number(th.source_count) || (th.sources || []).length || 0,
+                block: blockName,
+              });
+            });
+          });
           if (!selected.length) throw new Error("Отметь хотя бы одну тему.");
           const data = await api("/api/topics/select", {
             method: "POST",
             body: { topics: selected },
           });
           S.checked.clear();
-          renderFound();
+          renderTopics();
           await loadTopics();
           toast(`Сохранено тем в «Темы дня»: ${data.saved}`, "ok");
         });
@@ -694,10 +791,10 @@
       async function loadTopics() {
         const data = await api("/api/topics");
         S.topics = data.topics;
-        renderTopics();
+        renderDailyTopics();
         renderStats();
       }
-      function renderTopics() {
+      function renderDailyTopics() {
         $("topics-count").textContent = "(" + S.topics.length + ")";
         const wrap = $("topics");
         wrap.innerHTML = "";
@@ -705,7 +802,19 @@
           wrap.innerHTML = `<p class="empty">Пока нет тем. Собери тренды и отметь понравившиеся темы в «🌐 Найденные темы».</p>`;
           return;
         }
-        S.topics.slice(0, 20).forEach((t) => wrap.appendChild(topicCard(t)));
+        // Группировка выбранных тем по блоку (поле block из БД)
+        const groups = {};
+        S.topics.slice(0, 20).forEach((t) => {
+          const g = (t.block || "").trim() || "Темы";
+          (groups[g] = groups[g] || []).push(t);
+        });
+        Object.keys(groups).forEach((g) => {
+          const header = document.createElement("div");
+          header.className = "block-header";
+          header.textContent = "📂 " + g;
+          wrap.appendChild(header);
+          groups[g].forEach((t) => wrap.appendChild(topicCard(t)));
+        });
       }
       function topicCard(t) {
         const card = document.createElement("div");
@@ -930,6 +1039,8 @@
         $("btn-collect").addEventListener("click", onCollect);
         $("btn-select").addEventListener("click", onSelect);
         $("btn-refresh").addEventListener("click", refreshAll);
+        $("btn-save-schedule").addEventListener("click", onSaveSchedule);
+        await loadSchedule();
         await refreshAll();
       }
       async function refreshAll() {
