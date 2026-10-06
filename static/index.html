@@ -1118,7 +1118,7 @@
           objections: [],
         };
         div.querySelectorAll(".plan-section").forEach((sec) => {
-          plan.sections.push({
+          const section = {
             heading: secVal(sec, ".sec-heading"),
             purpose: secVal(sec, ".sec-purpose"),
             points: Array.from(sec.querySelectorAll(".plan-point"))
@@ -1127,13 +1127,28 @@
             content_type: secVal(sec, ".sec-type"),
             estimated_length: secVal(sec, ".sec-len"),
             product_link: secVal(sec, ".sec-product"),
-          });
+          };
+          // Полностью пустые разделы (нет заголовка, цели, тезисов и связей) отбрасываем
+          if (
+            section.heading ||
+            section.purpose ||
+            section.points.length ||
+            section.content_type ||
+            section.estimated_length ||
+            section.product_link
+          ) {
+            plan.sections.push(section);
+          }
         });
         div.querySelectorAll(".obj-row").forEach((o) => {
-          plan.objections.push({
+          const objection = {
             objection: secVal(o, ".obj-text"),
             counter: secVal(o, ".obj-counter"),
-          });
+          };
+          // Пустые возражения (оба поля пусты) отбрасываем
+          if (objection.objection || objection.counter) {
+            plan.objections.push(objection);
+          }
         });
         return plan;
       }
@@ -1144,18 +1159,17 @@
         const plat = S.platform[topicId] || "habr";
         const box = $("art-" + topicId);
         const plan = collectPlan(div);
-        const filled =
-          plan.title ||
-          plan.summary ||
-          plan.conversion_goal ||
-          plan.sections.some((s) => s.heading || s.purpose || s.points.length);
-        if (!filled) {
-          toast(
-            "План пуст: заполни заголовок, описание или хотя бы один раздел.",
-            "err",
-          );
+        if (!plan.title) {
+          toast("Укажи заголовок плана перед генерацией статьи.", "err");
           return;
         }
+        if (!plan.sections.length) {
+          toast("План пуст: добавь хотя бы один заполненный раздел.", "err");
+          return;
+        }
+        const topic = (S.topics || []).find(
+          (t) => String(t.id) === String(topicId),
+        );
         box.innerHTML = `<p class="hint"><span class="loader"></span>Генерация статьи… (1–3 мин)</p>`;
         try {
           const data = await api("/api/articles/generate-v2", {
@@ -1163,7 +1177,13 @@
             body: {
               topic_id: topicId,
               platform: plat,
-              plan: plan,
+              plan_title: plan.title,
+              plan_summary: plan.summary,
+              plan_sections: plan.sections,
+              plan_objections: plan.objections,
+              plan_sources: Array.isArray(topic && topic.sources)
+                ? topic.sources
+                : [],
             },
           });
           box.innerHTML = "";
