@@ -221,6 +221,24 @@
       .badge.score {
         color: var(--yellow);
       }
+      .badge.plat {
+        color: var(--accent);
+        border-color: rgba(88, 166, 255, 0.45);
+      }
+      .plan-hints {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin: 2px 0 10px;
+      }
+      .hint-chip {
+        font-size: 12px;
+        color: var(--yellow);
+        background: var(--panel2);
+        border: 1px solid rgba(210, 153, 34, 0.35);
+        border-radius: 6px;
+        padding: 3px 9px;
+      }
       .t-title {
         font-size: 15px;
         font-weight: 600;
@@ -967,8 +985,11 @@
           });
           S.plansByTopic[topicId] = {
             plan: data.plan,
+            platform: data.platform,
             platform_name: data.platform_name,
             style: data.style,
+            tone: data.tone || "",
+            max_product_mention: data.max_product_mention || "",
           };
           renderPlans(topicId, S.plansByTopic[topicId]);
         } catch (e) {
@@ -1052,12 +1073,17 @@
       function renderPlans(topicId, store) {
         const box = $("plans-" + topicId);
         const plan = (store && store.plan) || {};
+        const tone = (store && store.tone) || "";
+        const maxMention = (store && store.max_product_mention) || "";
         box.innerHTML = `<div class="hint" style="margin-bottom:6px">Платформа: <b>${esc(store.platform_name)}</b> · ${esc(store.style)}</div>`;
         const div = document.createElement("div");
         div.className = "plan";
         div.dataset.topic = topicId;
         div.innerHTML = `
-          <h4><span>📌 План статьи</span></h4>
+          <h4>
+            <span>📌 План статьи</span>
+            ${store.platform_name ? `<span class="badge plat">🏷 ${esc(store.platform_name)}</span>` : ""}
+          </h4>
           <label class="plan-lbl">Заголовок плана
             <input type="text" class="plan-title" value="${esc(plan.title || "")}" placeholder="Заголовок статьи…">
           </label>
@@ -1067,6 +1093,15 @@
           <label class="plan-lbl">Целевая метрика конверсии
             <textarea class="plan-conversion" rows="2" placeholder="Регистрация / запрос демо / отклик на вакансию и где это предложено в CTA…">${esc(plan.conversion_goal || "")}</textarea>
           </label>
+          ${
+            tone || maxMention
+              ? `
+          <div class="plan-hints">
+            ${tone ? `<span class="hint-chip">🎯 Тон: ${esc(tone)}</span>` : ""}
+            ${maxMention ? `<span class="hint-chip">🔢 Лимит упоминания продукта: ${esc(maxMention)}</span>` : ""}
+          </div>`
+              : ""
+          }
           <div class="plan-sub">📐 Разделы</div>
           <div class="plan-sections"></div>
           <div class="plan-sub">🛡 Риски и возражения</div>
@@ -1212,10 +1247,13 @@
         div.dataset.artId = a.id;
         const expert = !!(a.final_content && a.expert_report);
         const body = expert ? a.final_content : a.article || "";
+        const platName = a.platform_name || a.platform || "";
         div.innerHTML = `
-          <div class="badge">${esc(a.platform_name || a.platform || "")}</div>
           <div class="badge">${a.status === "published" ? "✅ опубликована" : a.status === "expertised" ? "🧪 проверена" : "📝 черновик"}</div>
-          <div class="t-title">${esc(a.plan_title || a.topic_title || "Статья")}</div>
+          <div class="t-title">
+            ${platName ? `<span class="badge plat">🏷 ${esc(platName)}</span>` : ""}
+            ${esc(a.plan_title || a.topic_title || "Статья")}
+          </div>
           ${
             expert
               ? `
@@ -1236,9 +1274,7 @@
             ${
               expert
                 ? `<button class="btn small primary" data-act="copy-final">📋 Копировать финальный текст</button>`
-                : `<button class="btn small green" data-act="expert" data-id="${a.id}">🔍 Отправить на экспертизу</button>
-                 <button class="btn small" data-act="copy-h">📋 Копировать HTML</button>
-                 <button class="btn small" data-act="copy-t">📋 Копировать текст</button>`
+                : `<button class="btn small green" data-act="expert" data-id="${a.id}">🔍 Отправить на экспертизу</button>`
             }
           </div>
         `;
@@ -1252,28 +1288,6 @@
             try {
               await navigator.clipboard.writeText(a.final_content || "");
               toast("Финальный текст скопирован", "ok");
-            } catch (e) {
-              toast("Не удалось скопировать: " + e.message, "err");
-            }
-          });
-        }
-        const copyH = div.querySelector('[data-act="copy-h"]');
-        if (copyH) {
-          copyH.addEventListener("click", async () => {
-            try {
-              await navigator.clipboard.writeText(a.article || "");
-              toast("HTML скопирован", "ok");
-            } catch (e) {
-              toast("Не удалось скопировать: " + e.message, "err");
-            }
-          });
-        }
-        const copyT = div.querySelector('[data-act="copy-t"]');
-        if (copyT) {
-          copyT.addEventListener("click", async () => {
-            try {
-              await navigator.clipboard.writeText(stripHtml(a.article));
-              toast("Текст скопирован", "ok");
             } catch (e) {
               toast("Не удалось скопировать: " + e.message, "err");
             }

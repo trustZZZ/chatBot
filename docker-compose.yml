@@ -9,10 +9,11 @@ services:
       - LLM_MODEL=${LLM_MODEL}
       - TZ=Europe/Moscow
       - TRENDS_TIME=${TRENDS_TIME:-09:00}
-      # Прокси для внешних API (HackerNews, GitHub, Google News, DeepSeek,
-      # Telegraph): sing-box на хосте, 127.0.0.1:8080. При network_mode:
-      # "host" 127.0.0.1 из контейнера = 127.0.0.1 хоста, host.docker.internal
+      # Прокси для внешних API (HackerNews, GitHub, Google News, Telegraph):
+      # sing-box на хосте, 127.0.0.1:8080. При network_mode: "host"
+      # 127.0.0.1 из контейнера = 127.0.0.1 хоста, host.docker.internal
       # НЕ резолвится — не использовать!
+      # LLM (AITUNNEL) ходит напрямую, без прокси — см. bot.py.
       # Пустое значение (PROXY_URL=) = прямое подключение.
       - PROXY_URL=${PROXY_URL:-http://127.0.0.1:8080}
     volumes:
