@@ -4,6 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Trend Scanner — Веб-панель</title>
+    <!-- marked: Markdown → HTML через CDN (без npm и build-шагов) -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
       :root {
         --bg: #0d1117;
@@ -581,6 +583,83 @@
           padding: 16px;
         }
       }
+      /* ---------- Markdown (контейнер .article-content) ---------- */
+      .article-content h1 {
+        font-size: 1.6em;
+        margin: 1em 0 0.5em;
+      }
+      .article-content h2 {
+        font-size: 1.4em;
+        margin: 1em 0 0.5em;
+      }
+      .article-content h3 {
+        font-size: 1.2em;
+        margin: 0.8em 0 0.4em;
+      }
+      .article-content p {
+        margin: 0.5em 0;
+        line-height: 1.6;
+      }
+      .article-content ul,
+      .article-content ol {
+        margin: 0.5em 0;
+        padding-left: 1.5em;
+      }
+      .article-content li {
+        margin: 0.2em 0;
+      }
+      .article-content code {
+        background: #f4f4f4;
+        padding: 2px 6px;
+        border-radius: 3px;
+        font-family: monospace;
+        font-size: 0.9em;
+      }
+      .article-content pre {
+        background: #1e1e1e;
+        color: #d4d4d4;
+        padding: 1em;
+        border-radius: 6px;
+        overflow-x: auto;
+        margin: 1em 0;
+      }
+      .article-content pre code {
+        background: none;
+        color: inherit;
+        padding: 0;
+      }
+      .article-content blockquote {
+        border-left: 3px solid #ccc;
+        margin: 0.5em 0;
+        padding-left: 1em;
+        color: #666;
+      }
+      .article-content table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 1em 0;
+      }
+      .article-content th,
+      .article-content td {
+        border: 1px solid #ddd;
+        padding: 8px 12px;
+        text-align: left;
+      }
+      .article-content th {
+        background: #f0f0f0;
+        font-weight: bold;
+      }
+      .article-content a {
+        color: #0066cc;
+        text-decoration: none;
+      }
+      .article-content a:hover {
+        text-decoration: underline;
+      }
+      .article-content img {
+        max-width: 100%;
+        border-radius: 6px;
+      }
     </style>
   </head>
   <body>
@@ -651,6 +730,13 @@
     <script>
       "use strict";
 
+      // Настройка marked (Markdown → HTML) — один раз при инициализации
+      if (typeof marked !== "undefined") {
+        marked.setOptions({ breaks: true, gfm: true });
+      } else {
+        console.error("marked library not loaded");
+      }
+
       const $ = (id) => document.getElementById(id);
       const S = {
         // {blocks: [{block_name, themes}]} из /api/trends/collect («Найденные темы»)
@@ -673,6 +759,20 @@
         const d = document.createElement("div");
         d.innerHTML = h || "";
         return d.textContent || "";
+      }
+      // Markdown → HTML с проверкой загрузки библиотеки и защитой от ошибок
+      function renderMarkdown(src) {
+        const text = String(src ?? "");
+        if (typeof marked === "undefined") {
+          console.error("marked library not loaded");
+          return esc(text || "Текст статьи не доступен");
+        }
+        try {
+          return marked.parse(text);
+        } catch (e) {
+          console.error("Ошибка рендеринга Markdown", e);
+          return esc(text);
+        }
       }
       function fmtDt(iso) {
         if (!iso) return "—";
@@ -1247,6 +1347,7 @@
         div.dataset.artId = a.id;
         const expert = !!(a.final_content && a.expert_report);
         const body = expert ? a.final_content : a.article || "";
+        const bodyHtml = renderMarkdown(body);
         const platName = a.platform_name || a.platform || "";
         div.innerHTML = `
           <div class="badge">${a.status === "published" ? "✅ опубликована" : a.status === "expertised" ? "🧪 проверена" : "📝 черновик"}</div>
@@ -1269,7 +1370,7 @@
           </div>`
               : ""
           }
-          <div class="article-body">${body}</div>
+          <div class="article-content article-body">${bodyHtml}</div>
           <div class="art-actions">
             ${
               expert
@@ -1285,11 +1386,47 @@
         const copyFinal = div.querySelector('[data-act="copy-final"]');
         if (copyFinal) {
           copyFinal.addEventListener("click", async () => {
+            // Копируем ИСХОДНЫЙ Markdown, а не HTML из marked.parse()
+            const textToCopy = (a.final_content || a.article || "").trim();
+            if (!textToCopy) {
+              console.error("Текст для копирования не найден");
+              toast("Нет текста для копирования", "err");
+              return;
+            }
             try {
-              await navigator.clipboard.writeText(a.final_content || "");
+              if (
+                !navigator.clipboard ||
+                typeof navigator.clipboard.writeText !== "function"
+              ) {
+                throw new Error("Clipboard API недоступен");
+              }
+              await navigator.clipboard.writeText(textToCopy);
               toast("Финальный текст скопирован", "ok");
-            } catch (e) {
-              toast("Не удалось скопировать: " + e.message, "err");
+            } catch (err) {
+              console.error("Ошибка при копировании текста", err);
+              // Fallback для старых браузеров / небезопасного контекста
+              try {
+                const textarea = document.createElement("textarea");
+                textarea.value = textToCopy;
+                textarea.style.position = "fixed";
+                textarea.style.opacity = "0";
+                document.body.appendChild(textarea);
+                textarea.select();
+                const ok = document.execCommand("copy");
+                document.body.removeChild(textarea);
+                if (ok) {
+                  toast("Финальный текст скопирован (fallback)", "ok");
+                } else {
+                  throw new Error("execCommand('copy') вернул false");
+                }
+              } catch (err2) {
+                console.error("Не удалось скопировать текст", err2);
+                toast(
+                  "Не удалось скопировать текст: " +
+                    (err2 && err2.message ? err2.message : String(err2)),
+                  "err",
+                );
+              }
             }
           });
         }
